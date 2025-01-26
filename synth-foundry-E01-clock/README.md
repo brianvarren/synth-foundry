@@ -1,4 +1,4 @@
-![assets/img/E01-clock-schematic-img.png]
+![clock module](assets/img/E01-clock-schematic-img.png)
 
 # Synth Foundry - Clock Module
 
