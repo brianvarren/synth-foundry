@@ -1,4 +1,4 @@
-![clock module](assets/img/E01-clock-schematic-img.png)
+![clock module](assets/img/E01-clock-schematic_page_1.png)
 
 # Synth Foundry - Clock Module
 
@@ -14,7 +14,7 @@ Built from scratch, powered by the **RP2040-Zero**, and fully open-source.
 
 ## **🎥 Watch the Full Breakdown on YouTube**
 
-[![Watch on YouTube](https://img.youtube.com/vi/YOUTUBE_VIDEO_ID/hqdefault.jpg)](https://www.youtube.com/watch?v=YOUTUBE_VIDEO_ID)  
+[![Watch on YouTube](https://img.youtube.com/vi/BvUXzn_yLwA/hqdefault.jpg)](https://www.youtube.com/watch?v=BvUXzn_yLwA)  
 👉 Click to see the full build, explanation, and demo.
 
 ---
@@ -74,7 +74,7 @@ At its core, the **Clock Module** divides time using the **RP2040's hardware tim
 
 ### **3️⃣ Adjusting BPM & Divisions**
 
-- Use the **switches** to tweak BPM.
+- Use the **switch** to tweak BPM.
 - Adjust **division knobs** for real-time time subdivision changes.
 - OLED display updates dynamically to show changes.
 
