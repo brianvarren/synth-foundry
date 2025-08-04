@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build and Upload to Waveshare RP2040-Zero",
+      "type": "shell",
+      "command": "arduino-cli compile --fqbn rp2040:rp2040:waveshare_rp2040_zero --export-binaries . && cp ./build/rp2040.rp2040.waveshare_rp2040_zero/*.uf2 /media/$USER/RPI-RP2/",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "Serial Monitor",
+      "type": "shell",
+      "command": "arduino-cli",
+      "args": [
+        "monitor",
+        "--port", "/dev/ttyACM0",
+        "-c", "baudrate=115200"
+      ],
+      "presentation": {
+        "panel": "dedicated",
+        "focus": true
+      }
+    }
+  ]
+}
