@@ -8,6 +8,14 @@
 #include <elapsedMillis.h>
 #include "EEncoder.h"
 #include "FastFrequencyCalculator.h"  // NEW: Include the frequency calculator
+#include "hardware/interp.h"
+
+
+DAClessConfig cfg;
+
+DAClessAudio engine;
+
+uint16_t audio_block_size = 0;
 
 void updateDisplay();
 
@@ -112,8 +120,78 @@ volatile bool quantize_increments_to_semitones = true;
 // - findNearestSemitoneIncrement()
 // - correctionFactor()
 
+class MovingAverageFilter {
+private:
+  uint16_t *buffer;
+  uint32_t index = 0;
+  uint32_t sum = 0;
+  uint8_t filterSize;
+
+public:
+  MovingAverageFilter(uint8_t size) : filterSize(size) {
+    buffer = new uint16_t[filterSize];
+    for (uint32_t i = 0; i < filterSize; ++i) {
+      buffer[i] = 0;
+    }
+  }
+
+  uint16_t process(uint16_t input) {
+    sum -= buffer[index];
+    buffer[index] = input;
+    sum += input;
+    index = (index + 1) % filterSize;
+
+    return static_cast<uint16_t>(sum / filterSize);
+  }
+};
+
+
 MovingAverageFilter FMfilter(8);
 MovingAverageFilter posFilter(8);
+
+void setupInterpolators() {
+    interp_config cfg_0 = interp_default_config();
+    interp_config_set_blend(&cfg_0, true);
+    interp_set_config(interp0, 0, &cfg_0);
+    cfg_0 = interp_default_config();
+    interp_set_config(interp0, 1, &cfg_0);
+
+    interp_config cfg_1 = interp_default_config();
+    interp_config_set_blend(&cfg_1, true);
+    interp_set_config(interp1, 0, &cfg_1);
+    cfg_1 = interp_default_config();
+    interp_set_config(interp1, 1, &cfg_1);
+}
+
+inline uint16_t interpolate(uint16_t x, uint16_t y, uint16_t mu_scaled) {
+    // Assume x and y are your two data points and x is the base
+    interp0->base[0] = x;
+    interp0->base[1] = y;
+
+    // Accumulator setup (mu value)
+    uint16_t acc = mu_scaled;  // Scaled "mu" value
+    interp0->accum[1] = acc;
+
+    // Perform the interpolation
+    uint16_t result = interp0->peek[1];
+
+    return result;
+}
+
+inline uint16_t interpolate1(uint16_t x, uint16_t y, uint16_t mu_scaled) {
+    // Assume x and y are your two data points and x is the base
+    interp1->base[0] = x;
+    interp1->base[1] = y;
+
+    // Accumulator setup (mu value)
+    uint16_t acc = mu_scaled;  // Scaled "mu" value
+    interp1->accum[1] = acc;
+
+    // Perform the interpolation
+    uint16_t result = interp1->peek[1];
+
+    return result;
+}
 
 // Crossfade morph function (unchanged)
 void crossfadeMorph(const int16_t* wavetable_data, volatile int16_t* interp_table, uint8_t frame_count, uint16_t samples_per_frame, uint16_t num_interp_frames) {
@@ -152,21 +230,21 @@ volatile int16_t* current_waveform = waveform_a;
 volatile int16_t* next_waveform = waveform_b;
 
 // REFACTORED process() function using FrequencyCalculator
-void process() {
+void updateAudioBlock(void* userdata, uint16_t* buffer) {
     static bool crossfading = false;
     static uint16_t crossfadeCounter = 0;
 
     // Read amplitude once per block for smooth manual control
-    uint16_t amp_adc = adc_results_buf[0];    // 0 = min, 4095 = max
+    uint16_t amp_adc = engine.getADC(0);    // 0 = min, 4095 = max
 
-    for (process_index = 0; process_index < AUDIO_BLOCK_SIZE; process_index++) {
+    for (process_index = 0; process_index < audio_block_size; process_index++) {
         // Get ADC values
         // NOTE: The inversion here (4095 - adc) might be causing the mode confusion
         // In LFO mode, you might want raw ADC values instead of inverted
         //uint16_t vOctADC = 4095 - adc_results_buf[3];  // Inverted for V/oct
         
         // Alternative for debugging - try without inversion:
-        uint16_t vOctADC = adc_results_buf[3];  // Raw ADC value
+        uint16_t vOctADC = engine.getADC(3);  // Raw ADC value
         
         // FM modulation - using actual ADC value now
         //fm_adc_value = 4095 - adc_results_buf[2];  // Re-enabled FM input
@@ -222,7 +300,7 @@ void process() {
         
         int16_t delta = out_0 - 2048;           // 1 SUB
         int32_t scaled = (int32_t)delta * amp_adc >> 12; // 1 MUL, 1 SHR
-        out_buf_ptr[process_index] = scaled + 2048;         // 1 ADD
+        buffer[process_index] = scaled + 2048;         // 1 ADD
     }
 }
 
@@ -255,13 +333,24 @@ void setup() {
     encoder.setEncoderHandler(onEncoderRotate);
     pinMode(PIN_LED_LFO, OUTPUT);
 
-    for (int i = 0; i < AUDIO_BLOCK_SIZE; i++) {
-        pwm_out_buf_a[i] = i;
-        pwm_out_buf_b[i] = i;
-    }
+    // for (int i = 0; i < AUDIO_BLOCK_SIZE; i++) {
+    //     pwm_out_buf_a[i] = i;
+    //     pwm_out_buf_b[i] = i;
+    // }
 
-    configurePWM_DMA();
-    configureADC_DMA();
+    engine.setBlockCallback(updateAudioBlock, nullptr);
+    audio_block_size = engine.getConfig().blockSize;
+    engine.begin();
+
+    
+
+
+    sleep_ms(100);
+    engine.unmute();
+
+    Serial.print("DACless Audio initialized at ");
+    Serial.print(engine.getSampleRate());
+    Serial.println(" Hz");
 
     sleep_ms(1000);
 
@@ -327,10 +416,10 @@ void changeOctave(int8_t direction) {
 void loop() {
     encoder.update();
 
-    if (callback_flag > 0) {
-        process();
-        callback_flag = 0;
-    }
+    // if (callback_flag > 0) {
+    //     updateAudioBlock();
+    //     callback_flag = 0;
+    // }
     
     // Periodic debug output
     if (debug_print_timer >= debug_interval) {
@@ -354,6 +443,9 @@ void loop() {
             Serial.println(F("=== Debug Info ==="));
             Serial.print  (F("Mode:            "));
             Serial.println(sw_lfo_flag ? F("LFO") : F("Audio"));
+
+            Serial.print  (F("Audio Blk Size:  "));
+            Serial.println(audio_block_size);
 
             Serial.print  (F("LED:             "));
             Serial.println(digitalRead(PIN_LED_LFO) ? F("ON") : F("OFF"));
@@ -403,6 +495,8 @@ void loop() {
             }
 
             Serial.println(F("=================="));
+            Serial.println(engine.getADC(0));
+            Serial.println(engine.getADC(3));
         }
     }
 }
