@@ -14,9 +14,9 @@
 #include "MomentarySwitch.h"
 
 // Pin Definitions
-#define PIN_ENC_CLK    0
-#define PIN_ENC_DT     1
-#define PIN_ENC_SW     2
+#define PIN_ENC_CLK    1   // Encoder clock (DT on silkscreen)
+#define PIN_ENC_DT     0   // Encoder data (CLK on silkscreen)
+#define PIN_ENC_SW     2   // Encoder switch
 #define PIN_TRIG_LED   4
 #define PIN_PWM_OUT    6
 #define PIN_RESET_IN   8
@@ -36,12 +36,20 @@
 #define DEFAULT_VOLTAGE 1.65
 #define MIN_VOLTAGE    0.0
 #define MAX_VOLTAGE    3.3
-#define VOLTAGE_INCREMENT_FINE   0.001  // 1mV for fine adjustment
-#define VOLTAGE_INCREMENT_COARSE 0.01   // 10mV for coarse (accelerated)
+#define VOLTAGE_INCREMENT_NORMAL 0.005  // 5mV steps (~6 cents in 1V/oct)
+#define VOLTAGE_INCREMENT_FAST   0.020  // 20mV steps (~24 cents in 1V/oct)
 #define LONG_PRESS_DURATION 5000  // 5 seconds for reset
 
+// Calibration - adjust if your output doesn't match display
+// Measure actual output voltage and compare to display to determine these values
+// OFFSET: If output is consistently low, increase this value
+// SCALE: If error varies with voltage level, adjust this multiplier
+#define VOLTAGE_CALIBRATION_OFFSET  0.050  // Add 50mV to compensate for RC filter loss
+#define VOLTAGE_CALIBRATION_SCALE   1.000  // Fine-tune scaling if needed
+
 // PWM Settings
-#define PWM_BITS       13  // 13-bit: 0.4mV resolution, 15.3kHz carrier
+#define PWM_BITS       13  // 13-bit: 0.4mV PWM resolution, 15.3kHz carrier
+                           // This gives ~0.5 cent pitch resolution for 1V/oct
 #define PWM_MAX_VALUE  ((1 << PWM_BITS) - 1)
 #define BLOCK_SIZE     16
 
@@ -53,7 +61,7 @@ enum UIState {
 
 // Global Objects
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, OLED_RESET);
-EEncoder encoder(PIN_ENC_DT, PIN_ENC_CLK, PIN_ENC_SW, 4);  // 4 counts per detent (standard encoder)
+EEncoder encoder(PIN_ENC_CLK, PIN_ENC_DT, PIN_ENC_SW, 4);  // 4 counts per detent (standard encoder)
 MomentarySwitch manualTrigger(PIN_MANUAL_TRIG, true);  // Active low (pulls to ground)
 DAClessAudio* audio;
 
@@ -128,7 +136,7 @@ void setup() {
     encoder.setLongPressDuration(LONG_PRESS_DURATION);
     encoder.setDebounceInterval(5);  // Minimal debounce for fast response
     encoder.setAcceleration(true);
-    encoder.setAccelerationRate(10);  // 10x speed when turning fast
+    encoder.setAccelerationRate(4);  // 4x speed when turning fast (more reasonable)
     
     // Setup manual trigger button - use press handler for immediate response
     manualTrigger.setPressHandler(handleManualTrigger);
@@ -156,16 +164,27 @@ void setup() {
     Serial.println(" bits");
     Serial.print("Voltage Resolution: ");
     Serial.print(3.3 / PWM_MAX_VALUE * 1000, 3);
-    Serial.println(" mV/step");
+    Serial.println(" mV/step (PWM)");
+    Serial.print("Encoder Resolution: ");
+    Serial.print(VOLTAGE_INCREMENT_NORMAL * 1000, 1);
+    Serial.println(" mV/click (5mV)");
+    Serial.print("Calibration Offset: +");
+    Serial.print(VOLTAGE_CALIBRATION_OFFSET * 1000, 1);
+    Serial.println(" mV");
     Serial.println("\nControls:");
     Serial.println("  Playback Mode:");
-    Serial.println("    - Turn encoder: Change number of steps");
+    Serial.println("    - Turn encoder: Cycle through steps");
+    Serial.println("    - Press+Turn: Add/remove steps");
     Serial.println("    - Click encoder: Enter edit mode");
-    Serial.println("    - Manual trigger button: Advance step");
+    Serial.println("    - Manual trigger: Advance to next step");
     Serial.println("  Edit Mode:");
     Serial.println("    - Turn encoder: Adjust voltage");
-    Serial.println("    - Press+Turn: Navigate steps");
+    Serial.println("        Slow: 5mV steps");
+    Serial.println("        Medium: 10mV steps");
+    Serial.println("        Fast: 20mV steps");
+    Serial.println("    - Press+Turn: Add/remove steps");
     Serial.println("    - Click encoder: Return to playback");
+    Serial.println("    - Manual trigger: Edit next step");
     Serial.println("    - Long press (5s): Reset all voltages to 1.65V");
     Serial.println("\nDisplay running on Core1");
 }
@@ -199,10 +218,8 @@ void loop() {
     // Update LED flash state (non-blocking)
     updateLEDFlash();
     
-    // Process triggers only in playback mode
-    if (seq.uiState == STATE_PLAYBACK) {
-        processTriggers();
-    }
+    // Process external triggers (always active for trig/reset inputs)
+    processTriggers();
 }
 
 // Core1 loop - handles display updates
@@ -254,8 +271,8 @@ void updateDisplay() {
         
         // Show press+turn hint
         if (seq.encoderPressed) {
-            display.setCursor(0, 10);
-            display.print("<<< NAVIGATE >>>");
+            display.setCursor(100, 0);
+            display.print("+/-");
         }
     } else {
         display.print("PLAY ");
@@ -263,11 +280,17 @@ void updateDisplay() {
         display.print("/");
         display.print(seq.numSteps);
         display.print(" steps");
+        
+        // Show press+turn hint
+        if (seq.encoderPressed) {
+            display.setCursor(100, 0);
+            display.print("+/-");
+        }
     }
     
-    // Voltage display (large)
-    display.setTextSize(2);
-    display.setCursor(20, 25);
+    // Voltage display (extra large)
+    display.setTextSize(3);  // Larger text
+    display.setCursor(10, 18);  // Better centered
     
     float displayVoltage;
     if (seq.uiState == STATE_EDIT) {
@@ -276,14 +299,16 @@ void updateDisplay() {
         displayVoltage = seq.voltages[seq.currentStep];
     }
     
-    display.print(displayVoltage, 3);
+    // Display with 2 decimal places (hundredths)
+    display.print(displayVoltage, 2);
+    display.setTextSize(2);  // Smaller 'V'
     display.print("V");
     
-    // Step visualization (bottom)
+    // Step visualization (bottom) - taller bars
     display.setTextSize(1);
     int barWidth = SCREEN_WIDTH / seq.numSteps;
-    int barY = 50;
-    int barHeight = 10;
+    int barY = 46;  // Moved up slightly
+    int barHeight = 16;  // Taller bars (was 10)
     
     for (int i = 0; i < seq.numSteps; i++) {
         int x = i * barWidth;
@@ -310,31 +335,52 @@ void handleEncoder(EEncoder& enc) {
     int8_t increment = enc.getIncrement();
     if (increment == 0) return;
     
-    // Check if button is pressed for navigation
+    // Check if button is pressed for adding/removing steps
     bool buttonPressed = (digitalRead(PIN_ENC_SW) == LOW);
     seq.encoderPressed = buttonPressed;
     
-    if (seq.uiState == STATE_EDIT) {
-        if (buttonPressed) {
-            // Navigate through steps
-            int newStep = (int)seq.editStep + increment;
-            if (newStep >= seq.numSteps) {
-                seq.editStep = 0;
-            } else if (newStep < 0) {
+    if (buttonPressed) {
+        // Press+turn: Add/remove steps (works in both modes)
+        int newSteps = seq.numSteps + increment;
+        if (newSteps > MAX_STEPS) newSteps = MAX_STEPS;
+        if (newSteps < 2) newSteps = 2;
+        
+        if (newSteps != seq.numSteps) {
+            seq.numSteps = newSteps;
+            
+            // Wrap current/edit step if needed
+            if (seq.currentStep >= seq.numSteps) {
+                seq.currentStep = 0;
+                seq.currentPwmValue = voltageToPWM(seq.voltages[0]);
+            }
+            if (seq.editStep >= seq.numSteps) {
                 seq.editStep = seq.numSteps - 1;
-            } else {
-                seq.editStep = newStep;
             }
-        } else {
-            // Adjust voltage of current edit step
-            // Use fine increment for ±1, coarse for accelerated values
+            
+            Serial.print("Steps: ");
+            Serial.println(seq.numSteps);
+        }
+    } else {
+        // Normal turning: Navigate through steps or adjust voltage
+        if (seq.uiState == STATE_EDIT) {
+            // Edit mode: adjust voltage of current step
+            // Progressive acceleration: the faster you turn, the bigger the steps
             float delta;
-            if (abs(increment) == 1) {
-                delta = VOLTAGE_INCREMENT_FINE * increment;
+            uint8_t absInc = abs(increment);
+            
+            if (absInc == 1) {
+                // Single click - finest control (5mV)
+                delta = VOLTAGE_INCREMENT_NORMAL;
+            } else if (absInc <= 4) {
+                // Moderate speed - medium steps (10mV)
+                delta = VOLTAGE_INCREMENT_NORMAL * 2;
             } else {
-                // Scale coarse increment by acceleration factor
-                delta = VOLTAGE_INCREMENT_COARSE * increment;
+                // Fast turning - larger steps (20mV)
+                delta = VOLTAGE_INCREMENT_FAST;
             }
+            
+            // Apply direction
+            delta *= (increment > 0) ? 1 : -1;
             
             seq.voltages[seq.editStep] = constrainVoltage(seq.voltages[seq.editStep] + delta);
             
@@ -342,18 +388,22 @@ void handleEncoder(EEncoder& enc) {
             if (seq.editStep == seq.currentStep) {
                 seq.currentPwmValue = voltageToPWM(seq.voltages[seq.currentStep]);
             }
-        }
-    } else {
-        // In playback mode, encoder adjusts number of steps
-        int newSteps = seq.numSteps + increment;
-        if (newSteps > MAX_STEPS) newSteps = MAX_STEPS;
-        if (newSteps < 2) newSteps = 2;
-        seq.numSteps = newSteps;
-        
-        // Wrap current step if needed
-        if (seq.currentStep >= seq.numSteps) {
-            seq.currentStep = 0;
-            seq.currentPwmValue = voltageToPWM(seq.voltages[0]);
+        } else {
+            // Playback mode: cycle through steps
+            int newStep = (int)seq.currentStep + increment;
+            while (newStep >= seq.numSteps) newStep -= seq.numSteps;
+            while (newStep < 0) newStep += seq.numSteps;
+            seq.currentStep = newStep;
+            seq.currentPwmValue = voltageToPWM(seq.voltages[seq.currentStep]);
+            
+            // Flash LED briefly to indicate step change
+            startLEDFlash(0, 15);  // Very brief flash
+            
+            Serial.print("Manual step ");
+            Serial.print(seq.currentStep + 1);
+            Serial.print(": ");
+            Serial.print(seq.voltages[seq.currentStep], 2);
+            Serial.println("V");
         }
     }
     
@@ -369,6 +419,9 @@ void handleEncoderButton(EEncoder& enc) {
     } else {
         seq.uiState = STATE_PLAYBACK;
         seq.encoderPressed = false;
+        // When returning to playback, go to the step we were editing
+        seq.currentStep = seq.editStep;
+        seq.currentPwmValue = voltageToPWM(seq.voltages[seq.currentStep]);
         Serial.println("Entering PLAYBACK mode");
     }
     seq.displayNeedsUpdate = true;
@@ -393,22 +446,41 @@ void handleEncoderLongPress(EEncoder& enc) {
 
 void handleManualTrigger(MomentarySwitch& sw) {
     if (seq.uiState == STATE_PLAYBACK) {
+        // In playback mode: trigger advance
         triggerPending = true;
+    } else {
+        // In edit mode: advance to next step for editing
+        seq.editStep++;
+        if (seq.editStep >= seq.numSteps) {
+            seq.editStep = 0;
+        }
+        
+        // Flash LED to indicate step change
+        startLEDFlash(0, 20);  // Single 20ms flash
+        
+        seq.displayNeedsUpdate = true;
+        
+        Serial.print("Edit step ");
+        Serial.print(seq.editStep + 1);
+        Serial.println();
     }
 }
 
 void processTriggers() {
-    // Read trigger inputs with debouncing
+    // Read external trigger inputs with debouncing
     bool trigState = digitalRead(PIN_TRIG_IN);
     bool resetState = digitalRead(PIN_RESET_IN);
     
     // Detect falling edge on trigger input (active low)
     if (trigState == LOW && lastTrigState == HIGH) {
-        triggerPending = true;
+        // Only advance in playback mode from external trigger
+        if (seq.uiState == STATE_PLAYBACK) {
+            triggerPending = true;
+        }
     }
     lastTrigState = trigState;
     
-    // Detect falling edge on reset input
+    // Detect falling edge on reset input (works in both modes)
     if (resetState == LOW && lastResetState == HIGH) {
         resetPending = true;
     }
@@ -419,8 +491,8 @@ void processTriggers() {
         resetSequence();
         resetPending = false;
     }
-    // Process trigger
-    else if (triggerPending) {
+    // Process trigger (playback mode only)
+    else if (triggerPending && seq.uiState == STATE_PLAYBACK) {
         // Minimal debounce for fast response
         if (millis() - seq.lastTrigTime > 5) {
             advanceStep();
@@ -442,7 +514,7 @@ void advanceStep() {
     Serial.print("Step ");
     Serial.print(seq.currentStep + 1);
     Serial.print(": ");
-    Serial.print(seq.voltages[seq.currentStep], 3);
+    Serial.print(seq.voltages[seq.currentStep], 2);
     Serial.println("V");
 }
 
@@ -468,9 +540,19 @@ float constrainVoltage(float v) {
 }
 
 uint16_t voltageToPWM(float voltage) {
-    // Convert voltage (0-3.3V) to PWM value (0-65535)
+    // Apply calibration to compensate for RC filter and other losses
     voltage = constrainVoltage(voltage);
-    return (uint16_t)((voltage / MAX_VOLTAGE) * PWM_MAX_VALUE);
+    
+    // Apply calibration: scale first, then add offset
+    float calibratedVoltage = (voltage * VOLTAGE_CALIBRATION_SCALE) + VOLTAGE_CALIBRATION_OFFSET;
+    
+    // Ensure calibrated voltage doesn't exceed PWM range
+    if (calibratedVoltage > MAX_VOLTAGE) {
+        calibratedVoltage = MAX_VOLTAGE;
+    }
+    
+    // Convert to PWM value
+    return (uint16_t)((calibratedVoltage / MAX_VOLTAGE) * PWM_MAX_VALUE);
 }
 
 void audioBlockCallback(void* userdata, uint16_t* buffer) {
@@ -513,7 +595,7 @@ void updateLEDFlash() {
     
     switch (ledFlash.pattern) {
         case 0: // Single flash - just turn off after duration
-            if (elapsed >= 20) {
+            if (elapsed >= ledFlash.duration) {
                 digitalWrite(PIN_TRIG_LED, LOW);
                 ledFlash.active = false;
             }
