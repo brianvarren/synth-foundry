@@ -6,15 +6,9 @@
 #ifndef SDCARD_H
 #define SDCARD_H
 
-#include <Arduino.h>
 #include <SdFat.h>
 #include <SPI.h>
-
-// ─────────────────────── SD Card Pin Configuration ───────────────────────
-#define SD_CS_PIN   9   // Chip Select pin for the SD card
-#define SD_SCK_PIN  10  // Clock pin
-#define SD_MOSI_PIN 11  // Master Out Slave In
-#define SD_MISO_PIN 24  // Master In Slave Out
+#include "config_pins.h"
 
 #define SD_SPI_SPEED 60000000UL  // 60 MHz SPI speed
 #define SD_READ_BUFFER_SIZE (32 * 1024)  // 32KB read buffer

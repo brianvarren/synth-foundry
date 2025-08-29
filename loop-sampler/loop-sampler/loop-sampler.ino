@@ -1,3 +1,5 @@
+
+
 /**
  * Loop Sampler for Olimex Pico2-XXL
  * Main sketch that coordinates display, SD card, and audio playback
@@ -6,8 +8,10 @@
  */
 
 #include <Arduino.h>
-#include "display.h"
+#include "display.h"   // umbrella: driver + views
 #include "sdcard.h"
+
+using namespace sf;
 
 // ────────────────────────── Global State ───────────────────────────────────
 uint8_t* audioData = nullptr;         // Pointer to allocated PSRAM for audio sample
@@ -16,41 +20,41 @@ WavInfo currentWav;                   // Current WAV file metadata
 
 // ───────────────────────── Initialize PSRAM ───────────────────────────────────
 bool initPSRAM() {
-  Display.addLine("=== PSRAM ===");
+  view_print_line("=== PSRAM ===");
   
   if (!rp2040.getPSRAMSize()) {
-    Display.addLine("❌ No PSRAM");
+    view_print_line("❌ No PSRAM");
     return false;
   }
   
   uint32_t totalMB = rp2040.getPSRAMSize() / 1048576;
-  uint32_t freeKB = rp2040.getFreePSRAMHeap() / 1024;
+  uint32_t freeKB  = rp2040.getFreePSRAMHeap() / 1024;
   
-  Display.addLine("✅ " + String(totalMB) + " MB, free " + String(freeKB) + " KB");
+  view_print_line(("✅ " + String(totalMB) + " MB, free " + String(freeKB) + " KB").c_str());
   return true;
 }
 
 // ───────────────────────── Load WAV Sample into PSRAM ─────────────────────
 bool loadWavSample(const char* filename) {
-  Display.addLine("");
-  Display.addLine("=== Loading WAV ===");
-  Display.addLine("File: " + String(filename));
+  view_print_line("");
+  view_print_line("=== Loading WAV ===");
+  view_print_line(("File: " + String(filename)).c_str());
   
   // Get WAV info first
   if (!SDCard.getWavInfo(filename, currentWav)) {
-    Display.addLine("❌ Can't read WAV");
+    view_print_line("❌ Can't read WAV");
     return false;
   }
   
   // Display WAV properties
-  Display.addLine("Ch: " + String(currentWav.numChannels) + 
-                 ", Rate: " + String(currentWav.sampleRate) + "Hz");
-  Display.addLine("Bits: " + String(currentWav.bitsPerSample) + 
-                 ", Size: " + SDCard.formatSize(currentWav.dataSize));
+  view_print_line((String("Ch: ") + currentWav.numChannels +
+                   ", Rate: " + currentWav.sampleRate + "Hz").c_str());
+  view_print_line((String("Bits: ") + currentWav.bitsPerSample +
+                   ", Size: " + SDCard.formatSize(currentWav.dataSize)).c_str());
   
   // Check PSRAM availability
   if (currentWav.dataSize > rp2040.getFreePSRAMHeap()) {
-    Display.addLine("❌ PSRAM too small!");
+    view_print_line("❌ PSRAM too small!");
     return false;
   }
   
@@ -63,29 +67,29 @@ bool loadWavSample(const char* filename) {
   // Allocate PSRAM
   audioData = (uint8_t*)pmalloc(currentWav.dataSize);
   if (!audioData) {
-    Display.addLine("❌ Alloc failed");
+    view_print_line("❌ Alloc failed");
     return false;
   }
   
   audioDataSize = currentWav.dataSize;
   
   // Load the audio data
-  Display.addLine("Reading...");
-  Display.update();  // Force display update before long operation
+  view_print_line("Reading...");
+  view_flush_if_dirty();  // Force display update before long operation
   
   uint32_t bytesRead;
   float readSpeed = SDCard.loadWavData(filename, audioData, audioDataSize, &bytesRead);
   
   if (bytesRead != audioDataSize) {
-    Display.addLine("❌ Read error");
+    view_print_line("❌ Read error");
     free(audioData);
     audioData = nullptr;
     audioDataSize = 0;
     return false;
   }
   
-  Display.addLine("Speed: " + String(readSpeed, 2) + " MB/s");
-  Display.addLine("✅ Loaded " + SDCard.formatSize(bytesRead));
+  view_print_line((String("Speed: ") + String(readSpeed, 2) + " MB/s").c_str());
+  view_print_line((String("✅ Loaded ") + SDCard.formatSize(bytesRead)).c_str());
   
   return true;
 }
@@ -93,47 +97,47 @@ bool loadWavSample(const char* filename) {
 // ───────────────────────── Display Audio Data Sample ──────────────────────
 void showAudioDataSample() {
   if (!audioData || audioDataSize == 0) {
-    Display.addLine("No audio loaded");
+    view_print_line("No audio loaded");
     return;
   }
   
-  Display.addLine("");
-  Display.addLine("=== First 32 bytes ===");
+  view_print_line("");
+  view_print_line("=== First 32 bytes ===");
   
   String hexLine = "";
-  for (int i = 0; i < min(32u, audioDataSize); i++) {
+  for (uint32_t i = 0; i < min(32u, audioDataSize); i++) {
     char hex[4];
     sprintf(hex, "%02X ", audioData[i]);
     hexLine += hex;
     
     if ((i + 1) % 8 == 0) {
-      Display.addLine(hexLine);
+      view_print_line(hexLine.c_str());
       hexLine = "";
     }
   }
   
   if (hexLine.length() > 0) {
-    Display.addLine(hexLine);
+    view_print_line(hexLine.c_str());
   }
 }
 
 // ───────────────────────── List and Count WAV Files ───────────────────────
 int listWavFiles() {
-  Display.addLine("");
-  Display.addLine("=== WAV Files ===");
+  view_print_line("");
+  view_print_line("=== WAV Files ===");
   
   String files[20];
   uint32_t sizes[20];
   int count = SDCard.listWavFiles(files, sizes, 20);
   
   if (count == 0) {
-    Display.addLine("No WAV files found");
+    view_print_line("No WAV files found");
   } else {
     for (int i = 0; i < count; i++) {
-      Display.addLine(String(i + 1) + ". " + files[i] + 
-                     " (" + SDCard.formatSize(sizes[i]) + ")");
+      view_print_line((String(i + 1) + ". " + files[i] + 
+                      " (" + SDCard.formatSize(sizes[i]) + ")").c_str());
     }
-    Display.addLine("Total: " + String(count) + " files");
+    view_print_line((String("Total: ") + count + " files").c_str());
   }
   
   return count;
@@ -147,40 +151,42 @@ void setup() {
   Serial.println("\n=== Olimex Pico2-XXL Loop Sampler ===\n");
   
   // Initialize display first for visual feedback
-  Display.begin();
-  Display.addLine("=== Loop Sampler ===");
-  Display.addLine("Initializing...");
-  Display.update();
+  display_init();
+  view_show_status("Loop Sampler", "Initializing");
+  view_clear_log();
+  view_print_line("=== Loop Sampler ===");
+  view_print_line("Initializing...");
+  view_flush_if_dirty();
   delay(500);
   
   // Initialize PSRAM
   if (!initPSRAM()) {
-    Display.update();
+    view_flush_if_dirty();
     while(1) delay(100); // Halt if no PSRAM
   }
-  Display.update();
+  view_flush_if_dirty();
   delay(500);
   
   // Initialize SD Card
   if (!SDCard.begin()) {
-    Display.addLine("❌ SD Card failed!");
-    Display.update();
+    view_print_line("❌ SD Card failed!");
+    view_flush_if_dirty();
     while(1) delay(100); // Halt if no SD
   }
   
-  Display.addLine("✅ SD Card ready");
-  Display.addLine("Size: " + String(SDCard.getCardSizeMB(), 1) + " MB");
-  Display.update();
+  view_print_line((String("✅ SD Card ready")).c_str());
+  view_print_line((String("Size: ") + String(SDCard.getCardSizeMB(), 1) + " MB").c_str());
+  view_flush_if_dirty();
   delay(500);
   
   // List available WAV files
   int wavCount = listWavFiles();
-  Display.update();
+  view_flush_if_dirty();
   
   if (wavCount == 0) {
-    Display.addLine("");
-    Display.addLine("No samples to load!");
-    Display.update();
+    view_print_line("");
+    view_print_line("No samples to load!");
+    view_flush_if_dirty();
     return;
   }
   
@@ -194,22 +200,18 @@ void setup() {
     }
   }
   
-  Display.addLine("");
-  Display.addLine("=== Ready! ===");
-  Display.addLine("↑/↓ to scroll");
-  Display.update();
+  view_print_line("");
+  view_print_line("=== Ready! ===");
+  view_print_line("↑/↓ to scroll");
+  view_flush_if_dirty();
 }
 
 // ───────────────────────── Arduino Loop ───────────────────────────────────
 void loop() {
-  // Handle display scrolling
-  Display.handleScroll();
-  
-  // Update display if needed
-  if (Display.needsRedraw()) {
-    Display.update();
-  }
-  
+  // Handle display scrolling & redraw if needed
+  view_handle_scroll(millis());
+  view_flush_if_dirty();
+
   // TODO: Add button handling for sample triggering
   // TODO: Add UART MIDI handling
   // TODO: Add audio playback via PWM
