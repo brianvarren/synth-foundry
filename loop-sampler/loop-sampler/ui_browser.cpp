@@ -1,9 +1,16 @@
 #include <Arduino.h>
 #include "ui_browser.h"
+#include "ui_waveform.h"       // NEW: waveform display
 #include "display.h"           // for LINES_PER_SCREEN
 #include "display_views.h"     // view_* APIs
 #include "storage_file_index.h"
 #include "storage_sd_hal.h"    // sd_format_size()
+#include "storage_wav_meta.h"  // for WavInfo
+
+// Global variables from loop-sampler.ino (outside sf namespace)
+extern uint8_t* audioData;          // PSRAM buffer (from loop-sampler.ino)
+extern uint32_t audioSampleCount;   // Number of Q15 samples
+extern sf::WavInfo currentWav;      // For sample rate
 
 namespace sf {
 
@@ -16,9 +23,12 @@ static UiLoadFn  s_load = 0;           // app-provided loader
 static volatile bool s_pendingLoad = false;
 static int           s_pendingIdx  = -1;
 
+// Track post-load waveform display timing
+static bool s_pendingWaveform = false;
+static uint32_t s_waveformShowTime = 0;
+
 static void browser_render_sample_list()
 {
-
   view_set_auto_scroll(false); // Return view control to the user
 
   view_clear_log();
@@ -74,6 +84,16 @@ void browser_init(UiLoadFn onLoad) {
 
 void browser_on_turn(int8_t inc)
 {
+  // Check if waveform view is active
+  if (waveform_is_active()) {
+    if (!waveform_on_turn(inc)) {
+      // Waveform view exited, redraw browser
+      // Important: browser uses U8G2 text mode, not grayscale
+      browser_render_sample_list();
+    }
+    return;
+  }
+
   if (s_idx.count == 0) return;
 
   // Clamp selection
@@ -95,6 +115,16 @@ void browser_on_turn(int8_t inc)
 
 void browser_on_button(void)
 {
+  // Check if waveform view is active
+  if (waveform_is_active()) {
+    if (!waveform_on_button()) {
+      // Waveform view exited, redraw browser
+      // Important: browser uses U8G2 text mode, not grayscale
+      browser_render_sample_list();
+    }
+    return;
+  }
+
   if (s_idx.count == 0 || s_load == 0) return;
   s_pendingIdx  = s_sel;
   s_pendingLoad = true;
@@ -102,6 +132,25 @@ void browser_on_button(void)
 
 void browser_tick(void)
 {
+  // Handle deferred waveform display
+  if (s_pendingWaveform) {
+    if (millis() >= s_waveformShowTime) {
+      s_pendingWaveform = false;
+      
+      // Now show the waveform (uses grayscale mode)
+      if (::audioData && ::audioSampleCount > 0) {
+        // Clear display before drawing waveform
+        view_clear_log();
+        view_flush_if_dirty();
+        
+        // Initialize and draw waveform with 4-bit grayscale
+        waveform_init((const int16_t*)::audioData, ::audioSampleCount, ::currentWav.sampleRate);
+        waveform_draw();
+      }
+    }
+    return;
+  }
+  
   if (!s_pendingLoad) return;
 
   view_set_auto_scroll(true); // Auto-scroll during file load messages
@@ -121,10 +170,21 @@ void browser_tick(void)
   }
   view_flush_if_dirty();
 
-  const bool ok = s_load(path);
+  const bool ok = s_load(path);  // This does all the loading work and prints messages
 
-  view_print_line(ok ? "✅ Loaded" : "❌ Load failed");
-  //browser_render_sample_list();   // return to list after message
+  // Add final status message
+  view_print_line(ok ? "✓ Loaded" : "✗ Load failed");
+  view_flush_if_dirty();  // Make sure the final message is displayed
+  
+  if (ok && ::audioData && ::audioSampleCount > 0) {
+    // Schedule waveform display for 1 second from now
+    s_pendingWaveform = true;
+    s_waveformShowTime = millis() + 1000;  // Show waveform 1 second after "Loaded" message
+  } else if (!ok) {
+    // Failed load - return to browser after delay
+    delay(1000);
+    browser_render_sample_list();
+  }
 }
 
-} // namespace ui
+} // namespace sf;

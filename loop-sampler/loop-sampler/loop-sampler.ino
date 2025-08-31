@@ -9,13 +9,16 @@
 #include "display.h"    // umbrella: driver + views
 #include "storage.h"    // umbrella: sd_hal + wav_meta + file_index + sample_loader
 #include "ui.h"
+#include "ui_waveform.h"  // NEW: Waveform display
 
 using namespace sf;
 
 // ────────────────────────── Global State ───────────────────────────────────
-uint8_t* audioData = nullptr;         // PSRAM buffer for audio sample
-uint32_t audioDataSize = 0;           // Number of sample bytes
-WavInfo  currentWav;                  // WAV file metadata
+// Made global (outside namespace) so ui_browser.cpp can access them for waveform display
+uint8_t* audioData = nullptr;         // PSRAM buffer for Q15 audio samples
+uint32_t audioDataSize = 0;           // Number of bytes in Q15 buffer
+uint32_t audioSampleCount = 0;        // Number of Q15 samples
+sf::WavInfo currentWav;                // Original WAV file metadata (pre-conversion)
 
 // ───────────────────────── Initialize PSRAM ───────────────────────────────────
 bool initPSRAM() {
@@ -48,15 +51,15 @@ bool loadWavSample(const char* filename) {
     return false;
   }
 
-  // Show WAV properties
+  // Show original WAV properties
   {
     char sizeBuf[16];
     sd_format_size(currentWav.dataSize, sizeBuf, sizeof(sizeBuf));
-    snprintf(line, sizeof(line), "Ch: %u, Rate: %u Hz",
+    snprintf(line, sizeof(line), "Input: %uch, %u Hz",
              (unsigned)currentWav.numChannels, (unsigned)currentWav.sampleRate);
     view_print_line(line);
 
-    snprintf(line, sizeof(line), "Bits: %u, Size: %s",
+    snprintf(line, sizeof(line), "%u-bit, %s",
              (unsigned)currentWav.bitsPerSample, sizeBuf);
     view_print_line(line);
   }
@@ -66,11 +69,16 @@ bool loadWavSample(const char* filename) {
     return false;
   }
 
+  // Calculate output size (mono Q15)
+  uint32_t bytes_per_input_sample = (currentWav.bitsPerSample / 8) * currentWav.numChannels;
+  uint32_t total_input_samples = currentWav.dataSize / bytes_per_input_sample;
+  uint32_t required_output_size = total_input_samples * 2;  // Q15 = 2 bytes per sample
+
   // PSRAM capacity check
   uint32_t free_psram = rp2040.getFreePSRAMHeap();
-  if (currentWav.dataSize > free_psram) {
+  if (required_output_size > free_psram) {
     char needBuf[16], haveBuf[16];
-    sd_format_size(currentWav.dataSize, needBuf, sizeof(needBuf));
+    sd_format_size(required_output_size, needBuf, sizeof(needBuf));
     sd_format_size(free_psram, haveBuf, sizeof(haveBuf));
     snprintf(line, sizeof(line), "❌ PSRAM too small (need %s, have %s)", needBuf, haveBuf);
     view_print_line(line);
@@ -82,36 +90,32 @@ bool loadWavSample(const char* filename) {
     free(audioData);
     audioData = nullptr;
     audioDataSize = 0;
+    audioSampleCount = 0;
   }
 
-  // Allocate exactly the WAV data size
-  audioData = (uint8_t*)pmalloc(currentWav.dataSize);
+  // Allocate for Q15 output
+  audioData = (uint8_t*)pmalloc(required_output_size);
   if (!audioData) {
     view_print_line("❌ Alloc failed");
     return false;
   }
-  audioDataSize = currentWav.dataSize;
 
-  // Load audio payload
-  view_print_line("Reading...");
-  view_flush_if_dirty();  // show "Reading..." before long I/O
+  // Load, normalize, and convert to Q15
+  view_print_line("Processing...");
+  view_flush_if_dirty();  // show "Processing..." before long I/O
 
   uint32_t bytesRead = 0;
-  float mbps = wav_load_psram(filename, audioData, audioDataSize, &bytesRead);
+  float mbps = wav_load_psram(filename, audioData, required_output_size, &bytesRead);
 
-  // Require full read (we allocated exact size). Treat short read as failure.
-  if (bytesRead != audioDataSize) {
-    char gotBuf[16], expBuf[16];
-    sd_format_size(bytesRead, gotBuf, sizeof(gotBuf));
-    sd_format_size(audioDataSize, expBuf, sizeof(expBuf));
-    snprintf(line, sizeof(line), "❌ Read error (got %s, expected %s)", gotBuf, expBuf);
-    view_print_line(line);
-
+  if (bytesRead == 0) {
+    view_print_line("❌ Load failed");
     free(audioData);
     audioData = nullptr;
-    //audioDataSize = 0;
     return false;
   }
+
+  audioDataSize = bytesRead;
+  audioSampleCount = bytesRead / 2;  // Q15 samples are 2 bytes each
 
   // Success summary
   {
@@ -119,7 +123,7 @@ bool loadWavSample(const char* filename) {
     sd_format_size(bytesRead, sizeBuf, sizeof(sizeBuf));
     snprintf(line, sizeof(line), "Speed: %.2f MB/s", mbps);
     view_print_line(line);
-    snprintf(line, sizeof(line), "✅ Loaded %s", sizeBuf);
+    snprintf(line, sizeof(line), "✅ Loaded %s (%u samples)", sizeBuf, audioSampleCount);
     view_print_line(line);
   }
 
@@ -134,20 +138,34 @@ void showAudioDataSample() {
   }
   
   view_print_line("");
-  view_print_line("=== First 32 bytes ===");
+  view_print_line("=== Q15 Samples (hex) ===");
+  
+  // Show first 16 Q15 samples as hex
+  int16_t* samples = (int16_t*)audioData;
+  uint32_t samples_to_show = min(16u, audioSampleCount);
   
   String hexLine = "";
-  for (uint32_t i = 0; i < min(32u, audioDataSize); i++) {
-    char hex[4];
-    sprintf(hex, "%02X ", audioData[i]);
+  for (uint32_t i = 0; i < samples_to_show; i++) {
+    char hex[8];
+    sprintf(hex, "%04X ", (uint16_t)samples[i]);
     hexLine += hex;
     
-    if ((i + 1) % 8 == 0) {
+    if ((i + 1) % 4 == 0) {
       view_print_line(hexLine.c_str());
       hexLine = "";
     }
   }
   if (hexLine.length() > 0) view_print_line(hexLine.c_str());
+  
+  // Show first few samples as decimal values
+  view_print_line("");
+  view_print_line("=== Q15 Values ===");
+  for (uint32_t i = 0; i < min(8u, audioSampleCount); i++) {
+    char line[32];
+    float normalized = samples[i] / 32768.0f;
+    snprintf(line, sizeof(line), "[%u]: %d (%.4f)", i, samples[i], normalized);
+    view_print_line(line);
+  }
 }
 
 // ───────────────────────── List and Count WAV Files ───────────────────────
@@ -187,6 +205,7 @@ void setup() {
   view_show_status("Loop Sampler", "Initializing");
   view_clear_log();
   view_print_line("=== Loop Sampler ===");
+  view_print_line("Q15 DSP Mode");
   view_print_line("Initializing...");
   view_flush_if_dirty();
   delay(500);
@@ -231,8 +250,8 @@ void loop() {
 
   // TODO: Add button handling for sample triggering
   // TODO: Add UART MIDI handling
-  // TODO: Add audio playback via PWM
-  // TODO: Add effects processing
+  // TODO: Add audio playback via PWM/I2S (Q15 format ready)
+  // TODO: Add effects processing (Q15 DSP chain)
   
   //delay(10);
 }
