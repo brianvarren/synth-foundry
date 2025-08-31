@@ -126,7 +126,6 @@ bool loadWavSample(const char* filename) {
   return true;
 }
 
-
 // ───────────────────────── Display Audio Data Sample ──────────────────────
 void showAudioDataSample() {
   if (!audioData || audioDataSize == 0) {
@@ -217,32 +216,7 @@ void setup() {
   ui_input_init();
   browser_init(loadWavSample);
 
-  // // List WAVs
-  // int wavCount = listWavFiles();
-  // view_flush_if_dirty();
-  // if (wavCount == 0) {
-  //   view_print_line("");
-  //   view_print_line("No samples to load!");
-  //   view_flush_if_dirty();
-  //   return;
-  // }
-  
-  // delay(1000);
-  
-  // // Load first WAV
-  // {
-  //   FileIndex idx;
-  //   if (file_index_scan(idx) && idx.count > 0) {
-  //     if (loadWavSample(idx.names[0])) {
-  //       showAudioDataSample();
-  //     }
-  //   }
-  // }
-  
-  // view_print_line("");
-  // view_print_line("=== Ready! ===");
-  // view_print_line("↑/↓ to scroll");
-  // view_flush_if_dirty();
+  //view_set_auto_scroll(false);
 }
 
 // ───────────────────────── Arduino Loop ───────────────────────────────────

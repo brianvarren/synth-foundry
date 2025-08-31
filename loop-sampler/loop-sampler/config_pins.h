@@ -1,8 +1,8 @@
 #pragma once
 
 // ─────────────────────── Encoder ───────────────────────
-#define ENC_A_PIN   22
-#define ENC_B_PIN   23
+#define ENC_A_PIN   23
+#define ENC_B_PIN   22
 #define ENC_BTN_PIN 19
 
 // ─────────────────────── SD Card ───────────────────────

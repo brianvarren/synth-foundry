@@ -16,8 +16,11 @@ static UiLoadFn  s_load = 0;           // app-provided loader
 static volatile bool s_pendingLoad = false;
 static int           s_pendingIdx  = -1;
 
-static void render_page()
+static void browser_render_sample_list()
 {
+
+  view_set_auto_scroll(false); // Return view control to the user
+
   view_clear_log();
   view_print_line("=== WAV Files ===");
 
@@ -53,8 +56,7 @@ static void render_page()
   view_flush_if_dirty();
 }
 
-void browser_init(UiLoadFn onLoad)
-{
+void browser_init(UiLoadFn onLoad) {
   s_load = onLoad;
   s_sel  = 0;
   s_top  = 0;
@@ -67,7 +69,7 @@ void browser_init(UiLoadFn onLoad)
     return;
   }
 
-  render_page();
+  browser_render_sample_list();
 }
 
 void browser_on_turn(int8_t inc)
@@ -83,11 +85,11 @@ void browser_on_turn(int8_t inc)
     s_sel = next;
 
     // Keep selection in view
-    const int visible = LINES_PER_SCREEN;
+    const int visible = LINES_PER_SCREEN - 1;
     if (s_sel < s_top) s_top = s_sel;
     if (s_sel >= s_top + visible) s_top = s_sel - (visible - 1);
 
-    render_page();
+    browser_render_sample_list();
   }
 }
 
@@ -101,6 +103,8 @@ void browser_on_button(void)
 void browser_tick(void)
 {
   if (!s_pendingLoad) return;
+
+  view_set_auto_scroll(true); // Auto-scroll during file load messages
   s_pendingLoad = false;
 
   const int idx = s_pendingIdx;
@@ -120,7 +124,7 @@ void browser_tick(void)
   const bool ok = s_load(path);
 
   view_print_line(ok ? "✅ Loaded" : "❌ Load failed");
-  //render_page();   // return to list after message
+  //browser_render_sample_list();   // return to list after message
 }
 
 } // namespace ui

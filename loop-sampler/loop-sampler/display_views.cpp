@@ -11,6 +11,7 @@ static char  s_lines[MAX_DISPLAY_LINES][MAX_LINE_CHARS + 1];
 static int   s_line_count      = 0;
 static int   s_scroll_offset   = 0;
 static bool  s_dirty           = true;
+static bool  s_auto_scroll     = true;
 static uint32_t s_last_scroll  = 0;
 
 void view_clear_log() {
@@ -56,15 +57,21 @@ void view_redraw_log(U8G2& g) {
   s_dirty = false;
 }
 
-void view_handle_scroll(uint32_t now_ms) {
-  if (now_ms - s_last_scroll < SCROLL_DELAY_MS) return;
-  s_last_scroll = now_ms;
+void view_set_auto_scroll(bool enabled){
+  s_auto_scroll = enabled;
+}
 
-  // Auto-scroll only if content exceeds a page
-  if (s_line_count > LINES_PER_SCREEN) {
-    if (s_scroll_offset + LINES_PER_SCREEN < s_line_count) {
-      ++s_scroll_offset;
-      s_dirty = true;
+void view_handle_scroll(uint32_t now_ms) {
+  if (s_auto_scroll) {
+    if (now_ms - s_last_scroll < SCROLL_DELAY_MS) return;
+    s_last_scroll = now_ms;
+
+    // Auto-scroll only if content exceeds a page
+    if (s_line_count > LINES_PER_SCREEN) {
+      if (s_scroll_offset + LINES_PER_SCREEN < s_line_count) {
+        ++s_scroll_offset;
+        s_dirty = true;
+      }
     }
   }
 }
