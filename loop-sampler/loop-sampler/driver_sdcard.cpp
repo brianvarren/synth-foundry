@@ -1,8 +1,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <SdFat.h>
-#include "storage_sd_hal.h"
-#include "display_views.h"
+#include "driver_sdcard.h"
+#include "driver_sh1122.h"
 #include "config_pins.h"
 
 #define SD_SPI_SPEED 60000000

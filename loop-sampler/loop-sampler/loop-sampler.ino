@@ -6,10 +6,12 @@
  */
 
 #include <Arduino.h>
-#include "display.h"    // umbrella: driver + views
-#include "storage.h"    // umbrella: sd_hal + wav_meta + file_index + sample_loader
-#include "ui.h"
-#include "ui_waveform.h"  // NEW: Waveform display
+#include "driver_sh1122.h"
+#include "driver_sdcard.h"
+#include "ui_display.h"
+#include "ui_input.h"
+#include "storage_loader.h"
+#include "storage_wav_meta.h"
 
 using namespace sf;
 
