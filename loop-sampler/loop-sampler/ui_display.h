@@ -1,41 +1,50 @@
 #pragma once
 #include <stdint.h>
 
-// App-provided loader (keeps coupling low). Must perform the actual sample load.
-// Returns true on success, false on failure.
-typedef bool (*UiLoadFn)(const char* filename);
+// Global ISR entry you can call from ANY timer/ISR source
+extern "C" void displayTimerCallback(void);
 
 namespace sf {
 
 // ─────────────────────────── Display FSM ────────────────────────────────
 enum DisplayState : uint8_t {
-  DS_BROWSER = 0,          // File list visible
-  DS_LOADING,              // One-shot load work happens in tick()
-  DS_DELAY_TO_WAVEFORM,    // 1s “Loaded” message before drawing waveform
-  DS_WAVEFORM              // Waveform view (grayscale)
+  DS_BOOT = 0,
+  DS_SETUP,                    // NEW: showing setup status messages
+  DS_BROWSER,
+  DS_LOADING,
+  DS_DELAY_TO_WAVEFORM,
+  DS_WAVEFORM
 };
 
-// Optional: query current state (handy for debug/telemetry)
 DisplayState display_state(void);
 
-// ────────────────────── Waveform subview (internal-ish) ─────────────────
-// Bob keeps these public to avoid breaking existing includes.
-// You don’t need to call them directly from the sketch.
+// Waveform subview (kept public; you don't call these from the sketch)
 void waveform_init(const int16_t* samples, uint32_t count, uint32_t sampleRate);
 void waveform_draw(void);
-bool waveform_on_turn(int8_t inc);     // returns false to request exit to browser
-bool waveform_on_button(void);         // returns false to request exit to browser
-void waveform_exit(void);              // force-exit to browser
+bool waveform_on_turn(int8_t inc);
+bool waveform_on_button(void);
+void waveform_exit(void);
 
-// ───────────────────────── Browser / Top-level API ──────────────────────
-// Initialize the UI (build index, show list). Provide your loader callback.
-void browser_init(UiLoadFn onLoad);
+// ───────────────────────── Top-level Display API ────────────────────────
+// Init hardware and prepare for setup messages
+void display_init(void);
 
-// Pump the FSM from loop(). Does any deferred work (load, delay, waveform show).
-void browser_tick(void);
+// Signal that setup is complete and enter browser
+void display_setup_complete(void);
 
-// Forward your encoder/button events here.
-void browser_on_turn(int8_t inc);      // ±1 … ±5 (acceleration tolerated)
-void browser_on_button(void);          // select/load or exit waveform
+// Call this from loop(). It returns immediately unless an ISR set a flag.
+void display_tick(void);
+
+// Forward encoder/button events
+void display_on_turn(int8_t inc);
+void display_on_button(void);
+
+// Optional: start/stop an internal timer that calls the ISR at 'fps'
+bool display_timer_begin(uint32_t fps);   // returns true if started
+void display_timer_end(void);
+
+// ───────────────────────── Debug helpers (optional) ─────────────────────
+void display_debug_list_files(void);        // prints a simple, non-interactive list
+void display_debug_dump_q15(uint32_t n);    // prints first N Q15 samples (max clamps)
 
 } // namespace sf
