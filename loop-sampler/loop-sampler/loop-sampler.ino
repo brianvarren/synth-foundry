@@ -20,7 +20,7 @@ using namespace sf;
 uint8_t* audioData = nullptr;         // PSRAM buffer for Q15 audio samples
 uint32_t audioDataSize = 0;           // Number of bytes in Q15 buffer
 uint32_t audioSampleCount = 0;        // Number of Q15 samples
-sf::WavInfo currentWav;                // Original WAV file metadata (pre-conversion)
+WavInfo currentWav;                // Original WAV file metadata (pre-conversion)
 
 // ───────────────────────── Initialize PSRAM ───────────────────────────────────
 bool initPSRAM() {
