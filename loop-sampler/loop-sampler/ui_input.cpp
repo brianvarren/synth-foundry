@@ -2,7 +2,7 @@
 #include "EEncoder.h"
 #include "config_pins.h"        // ENC_A_PIN, ENC_B_PIN, ENC_BTN_PIN, ENC_COUNTS_PER_DETENT
 #include "ui_input.h"
-#include "ui_browser.h"
+#include "ui_display.h"
 
 namespace sf {
 
