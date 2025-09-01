@@ -7,6 +7,7 @@ struct WavMeta { uint32_t sampleRate; /* ...whatever else you have... */ };
 
 // These are your CURRENT globals in the default namespace
 extern uint8_t*  audioData;          // Q15 bytes in PSRAM
+extern uint32_t  audioDataSize;
 extern uint32_t  audioSampleCount;   // number of int16 samples
 extern WavMeta   currentWav;         // has sampleRate
 
@@ -14,6 +15,7 @@ extern WavMeta   currentWav;         // has sampleRate
 // that includes this header (that’s the trick).
 namespace sf {
   using ::audioData;
+  using ::audioDataSize;
   using ::audioSampleCount;
   using ::currentWav;
 }

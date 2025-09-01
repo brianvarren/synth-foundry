@@ -88,12 +88,12 @@ bool view_needs_redraw() { return s_dirty; }
 
 void view_flush_if_dirty() {
   if (!s_dirty) return;
-  auto& g = display_gfx();
+  auto& g = sh1122_gfx();
   view_redraw_log(g);
 }
 
 void view_show_status(const char* title, const char* line2) {
-  auto& g = display_gfx();
+  auto& g = sh1122_gfx();
   g.clearBuffer();
   g.setFont(u8g2_font_6x12_tf);
   if (title) g.drawStr(0, 14, title);
@@ -102,7 +102,7 @@ void view_show_status(const char* title, const char* line2) {
   s_dirty = false; // status renders immediately
 }
 
-void display_init() {
+void sh1122_init() {
   // Hardware reset (safe on SH1122 boards)
   pinMode(DISP_RST, OUTPUT);
   digitalWrite(DISP_RST, HIGH); delay(5);
@@ -137,9 +137,9 @@ static inline void sh1122_set_row(U8G2& u8, uint8_t row) {
   u8.sendF("ca", 0xB0, row);
 }
 
-void display_send_gray4(const uint8_t* buf_256x64_gray4) {
+void sh1122_send_gray4(const uint8_t* buf_256x64_gray4) {
   // Push one row (128 bytes) at a time
-  U8G2& u8 = display_gfx();
+  U8G2& u8 = sh1122_gfx();
 
   for (uint8_t y = 0; y < 64; ++y) {
     sh1122_set_row(u8, y);
@@ -293,16 +293,16 @@ void gray4_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t shade) 
 }
 
 void gray4_send_buffer() {
-  display_send_gray4(gray4_buffer);
+  sh1122_send_gray4(gray4_buffer);
 }
 
 uint8_t* gray4_get_buffer() {
   return gray4_buffer;
 }
 
-void display_set_contrast(uint8_t v) { u8g2.setContrast(v); }
-U8G2& display_gfx()                  { return u8g2; }
-void  display_clear_buffer()         { u8g2.clearBuffer(); }
-void  display_send_buffer()          { u8g2.sendBuffer(); }
+void sh1122_set_contrast(uint8_t v) { u8g2.setContrast(v); }
+U8G2& sh1122_gfx()                  { return u8g2; }
+void  sh1122_clear_buffer()         { u8g2.clearBuffer(); }
+void  sh1122_send_buffer()          { u8g2.sendBuffer(); }
 
 } // namespace sf

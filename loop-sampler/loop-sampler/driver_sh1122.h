@@ -49,20 +49,20 @@ void view_clear_screen();
 void view_draw_waveform_16(const int16_t* data, uint32_t frames, uint8_t channels);
 
 // One-time hardware init (pins, reset, SPI, u8g2.begin, defaults)
-void  display_init();
+void  sh1122_init();
 
 // Optional tweak
-void  display_set_contrast(uint8_t v);
+void  sh1122_set_contrast(uint8_t v);
 
 // Access to the single global U8g2 object (owned in .cpp)
-U8G2& display_gfx();
+U8G2& sh1122_gfx();
 
 // Convenience passthroughs (optional)
-void  display_clear_buffer();
-void  display_send_buffer();
+void  sh1122_clear_buffer();
+void  sh1122_send_buffer();
 
 // Send raw 4-bit grayscale buffer (128 bytes per row, 64 rows = 8192 bytes)
-void  display_send_gray4(const uint8_t* buf_256x64_gray4);
+void  sh1122_send_gray4(const uint8_t* buf_256x64_gray4);
 
 // === 4-bit Grayscale Drawing API ===
 // All shade values are 0-15 (0=black, 15=white)
@@ -81,7 +81,7 @@ void gray4_draw_line(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint8_t sha
 void gray4_draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t shade);
 void gray4_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t shade);
 
-// Send grayscale buffer to display
+// Send grayscale buffer to sh1122
 void gray4_send_buffer();
 
 // Direct access to grayscale buffer (256x64 pixels, 2 pixels per byte = 8192 bytes)

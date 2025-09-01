@@ -15,12 +15,12 @@ static EEncoder s_enc(ENC_A_PIN, ENC_B_PIN, ENC_BTN_PIN, ENC_COUNTS_PER_DETENT);
 void ui_encoder_turn_callback(EEncoder& enc)
 {
   int8_t inc = enc.getIncrement();   // normalized ±1, or ±N with accel
-  browser_on_turn(inc);
+  display_on_turn(inc);
 }
 
 void ui_encoder_button_press_callback(EEncoder& /*enc*/)
 {
-  browser_on_button();
+  display_on_button();
 }
 
 // Call this once from setup() after display/SD init

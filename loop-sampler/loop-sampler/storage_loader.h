@@ -30,9 +30,29 @@ const char* file_index_get(const FileIndex& idx, int i);
 // Returns: MB/s throughput; writes actual bytes written to bytesRead
 // Note: dstSize must be >= (num_samples * 2) bytes for Q15 output
 
-float wav_load_psram(const char* path,
-                     uint8_t* dst,
-                     uint32_t dstSize,
-                     uint32_t* bytesRead);
+// float wav_load_psram(const char* path,
+//                      uint8_t* dst,
+//                      uint32_t dstSize,
+//                      uint32_t* bytesRead);
+
+// new:
+
+// Pure decode: WAV (8/16/24/32-bit PCM, mono/stereo) → mono Q15 into caller buffer.
+// - No allocation, no globals, no printing.
+// - dst_q15 capacity (dst_bytes) must be >= required size (2 * total_samples).
+// Returns true on success. Writes bytes written and MB/s (overall decode throughput).
+bool wav_decode_q15_into_buffer(const char* path,
+                                int16_t* dst_q15,
+                                uint32_t dst_bytes,
+                                uint32_t* out_bytes_written,
+                                float* out_mbps);
+
+// High level orchestrator: allocates PSRAM, decodes, and publishes globals.
+// - Computes required bytes, checks PSRAM, pmallocs, decodes, sets audioData/audioSampleCount.
+// - On failure, frees any allocation and returns false.
+bool storage_load_sample_q15_psram(const char* path,
+                                   float* out_mbps,
+                                   uint32_t* out_bytes_read,
+                                   uint32_t* out_required_bytes);
 
 } // namespace sf

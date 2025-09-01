@@ -1,9 +1,11 @@
+#include <Arduino.h>
 #include "driver_sh1122.h"     // gray4_* API
 #include "driver_sdcard.h"     // FileIndex + file_index_scan(), sd_format_size()
 #include "ui_display.h"
-#include "storage_loader.h"    // extern audioData/audioSampleCount, etc. (your existing)
+#include "storage_loader.h"    // extern audioData/audioSampleCount, etc.
 #include "storage_wav_meta.h"  // extern currentWav (for sampleRate)
 #include "sf_globals_bridge.h"
+#include <pico/time.h>         // pico-sdk timer API
 
 namespace sf {
 
@@ -17,8 +19,7 @@ static const uint8_t SHADE_CENTERLINE  = 6;
 static FileIndex  s_idx;                // names[], sizes[], count
 static int        s_sel  = 0;           // selected row
 static int        s_top  = 0;           // top row of the current page
-static UiLoadFn   s_load = 0;           // app-provided loader
-static int        s_pendingIdx = -1;    // index captured on “load” press
+static int        s_pendingIdx = -1;    // index captured on "load" press
 
 // ─────────────────────────── Waveform state (UI) ─────────────────────────
 static const int16_t* s_samples     = 0;    // Q15 pointer in PSRAM
@@ -26,11 +27,28 @@ static uint32_t       s_sampleCount = 0;
 static uint32_t       s_sampleRate  = 0;
 
 // ─────────────────────────────── FSM state ───────────────────────────────
-static DisplayState s_state = DS_BROWSER;
-static uint32_t         s_tDelayUntil = 0;   // millis() deadline for DS_DELAY_TO_WAVEFORM
+static DisplayState s_state = DS_SETUP;  // START IN SETUP MODE
+static uint32_t     s_tDelayUntil = 0;   // millis() deadline for DS_DELAY_TO_WAVEFORM
+
+// ──────────────────────────── Timer ISR state ────────────────────────────
+static volatile bool     s_pendingUpdate = false;  // ISR sets, display_tick clears
+static repeating_timer_t s_displayTimer;           // pico-sdk timer handle
+static bool              s_timerActive = false;    // track if timer is running
 
 // ────────────────────────── Forward declarations ─────────────────────────
 static void browser_render_sample_list(void);
+
+// ───────────────────────────── Timer ISR ─────────────────────────────────
+// Global ISR entry point (extern "C" so it's callable from anywhere)
+extern "C" void displayTimerCallback(void) {
+  s_pendingUpdate = true;
+}
+
+// Pico-SDK timer callback (returns true to keep timer running)
+static bool display_timer_isr(repeating_timer_t* /*rt*/) {
+  displayTimerCallback();
+  return true;  // keep timer running
+}
 
 // ───────────────────────────── Small helpers ─────────────────────────────
 static void draw_center_line_if_empty(void) {
@@ -47,13 +65,9 @@ static void render_status_line(const char* msg) {
 }
 
 // ───────────────────────────── FSM accessors ─────────────────────────────
-
 DisplayState display_state(void) { return s_state; }
 
-
 // ───────────────────────────── Waveform view ─────────────────────────────
-
-
 void waveform_init(const int16_t* samples, uint32_t count, uint32_t sampleRate) {
   s_samples     = samples;
   s_sampleCount = count;
@@ -146,8 +160,7 @@ void waveform_exit(void) {
 }
 
 // ─────────────────────────── Browser rendering ───────────────────────────
-static void browser_render_sample_list()
-{
+static void browser_render_sample_list() {
   view_set_auto_scroll(false); // stop auto-scrolling while browsing
 
   view_clear_log();
@@ -167,7 +180,6 @@ static void browser_render_sample_list()
     char sizeStr[16];
     sd_format_size(s_idx.sizes[i], sizeStr, sizeof(sizeStr));
     const char marker = (i == s_sel) ? '>' : ' ';
-    // "›" and "•" are fine too; stick to ASCII for safety
     snprintf(line, sizeof(line), "%c %s (%s)", marker, s_idx.names[i], sizeStr);
     view_print_line(line);
   }
@@ -182,26 +194,131 @@ static void browser_render_sample_list()
   view_flush_if_dirty();
 }
 
-// ───────────────────────────── Browser / API ─────────────────────────────
-void browser_init(UiLoadFn onLoad) {
-  s_load = onLoad;
+// ──────────────────────── Top-level Display API ──────────────────────────
+void display_init(void) {
+  // Initialize hardware
+  sh1122_init();
+  
+  // Initialize state variables
   s_sel  = 0;
   s_top  = 0;
   s_pendingIdx = -1;
+  s_pendingUpdate = false;
+  
+  // Stay in DS_SETUP state - don't scan files or show browser yet
+  s_state = DS_SETUP;
+}
 
-  // Build the index (blocking scan, same as before)
+void display_setup_complete(void) {
+  // Build the index (blocking scan)
   if (!file_index_scan(s_idx)) {
     render_status_line("SD scan failed");
-    s_state = DS_BROWSER; // still in browser; list is just empty
-    return;
+    // Even on failure, enter browser (will show 0 files)
   }
-
+  
+  // Transition to browser and render
   s_state = DS_BROWSER;
   browser_render_sample_list();
 }
 
-void browser_on_turn(int8_t inc)
-{
+void display_tick(void) {
+  // Quick exit if no update needed (this is the common case)
+  if (!s_pendingUpdate) {
+    return;
+  }
+  
+  // Clear the flag atomically
+  s_pendingUpdate = false;
+  
+  // Process FSM based on current state
+  switch (s_state) {
+    
+    case DS_SETUP:
+      // In setup mode, just allow status messages to be shown
+      // Don't do anything special here
+      break;
+
+    case DS_LOADING: {
+      if (s_pendingIdx < 0 || s_pendingIdx >= s_idx.count) {
+        s_pendingIdx = -1;
+        s_state = DS_BROWSER;
+        browser_render_sample_list();
+        return;
+      }
+
+      view_set_auto_scroll(true);
+      view_clear_log();
+      {
+        char line[64];
+        snprintf(line, sizeof(line), "Loading: %s", s_idx.names[s_pendingIdx]);
+        view_print_line(line);
+      }
+      view_flush_if_dirty();
+
+      // Do the actual load (no callback now)
+      const char* path = s_idx.names[s_pendingIdx];
+      uint32_t bytesRead = 0, required = 0;
+      float mbps = 0.0f;
+
+      const bool ok = storage_load_sample_q15_psram(path, &mbps, &bytesRead, &required);
+
+      // Status lines (keep it text-only here)
+      {
+        char line[64];
+        if (ok) {
+          char sizeBuf[16];
+          sd_format_size(bytesRead, sizeBuf, sizeof(sizeBuf));
+          snprintf(line, sizeof(line), "Speed: %.2f MB/s", mbps);
+          view_print_line(line);
+          snprintf(line, sizeof(line), "✓ Loaded %s (%u samples)", sizeBuf, (unsigned)(bytesRead / 2));
+          view_print_line(line);
+        } else {
+          view_print_line("✗ Load failed");
+        }
+      }
+      view_flush_if_dirty();
+
+      if (ok && audioData && audioSampleCount > 0u) {
+        s_tDelayUntil = millis() + 1000u;   // UX: small pause before waveform
+        s_state = DS_DELAY_TO_WAVEFORM;
+      } else {
+        s_state = DS_BROWSER;               // back to list on failure
+      }
+
+      s_pendingIdx = -1;
+    } break;
+
+    case DS_DELAY_TO_WAVEFORM: {
+      if (millis() >= s_tDelayUntil) {
+        // Clear text view before grayscale draw
+        view_clear_log();
+        view_flush_if_dirty();
+
+        // Initialize and draw waveform
+        if (audioData && audioSampleCount > 0u) {
+          waveform_init((const int16_t*)audioData, audioSampleCount, currentWav.sampleRate);
+          waveform_draw();
+          s_state = DS_WAVEFORM;
+        } else {
+          // Safety net: nothing to draw; go back
+          s_state = DS_BROWSER;
+          browser_render_sample_list();
+        }
+      }
+    } break;
+
+    case DS_WAVEFORM:
+      // Could add periodic waveform updates here if needed
+      break;
+
+    case DS_BROWSER:
+    default:
+      // Browser view is static until user interaction
+      break;
+  }
+}
+
+void display_on_turn(int8_t inc) {
   switch (s_state) {
     case DS_WAVEFORM: {
       if (!waveform_on_turn(inc)) {
@@ -228,7 +345,8 @@ void browser_on_turn(int8_t inc)
       }
     } break;
 
-    // Ignore input during load/delay
+    // Ignore input during load/delay/setup
+    case DS_SETUP:
     case DS_LOADING:
     case DS_DELAY_TO_WAVEFORM:
     default:
@@ -236,8 +354,7 @@ void browser_on_turn(int8_t inc)
   }
 }
 
-void browser_on_button(void)
-{
+void display_on_button(void) {
   switch (s_state) {
     case DS_WAVEFORM: {
       if (!waveform_on_button()) {
@@ -246,16 +363,18 @@ void browser_on_button(void)
     } break;
 
     case DS_BROWSER: {
-      if (s_idx.count == 0 || s_load == 0) return;
+      if (s_idx.count == 0) return;
 
-      // Capture selection and transition to LOADING; the actual work happens in tick()
+      // Capture selection and transition to LOADING
       s_pendingIdx = s_sel;
       s_state = DS_LOADING;
-
-      // Status will be printed in tick(); keep callbacks snappy
+      
+      // Force an immediate update to show loading status
+      s_pendingUpdate = true;
     } break;
 
-    // Ignore extra presses during load/delay
+    // Ignore extra presses during load/delay/setup
+    case DS_SETUP:
     case DS_LOADING:
     case DS_DELAY_TO_WAVEFORM:
     default:
@@ -263,80 +382,76 @@ void browser_on_button(void)
   }
 }
 
-void browser_tick(void)
-{
-  switch (s_state) {
-    case DS_LOADING: {
-      // Defensive checks
-      if (s_pendingIdx < 0 || s_pendingIdx >= s_idx.count || s_load == 0) {
-        s_pendingIdx = -1;
-        s_state = DS_BROWSER;
-        browser_render_sample_list();
-        return;
-      }
-
-      // Show “Loading …” line (auto-scroll for multi-line loader messages)
-      view_set_auto_scroll(true);
-      view_clear_log();
-      {
-        char line[64];
-        snprintf(line, sizeof(line), "Loading: %s", s_idx.names[s_pendingIdx]);
-        view_print_line(line);
-      }
-      view_flush_if_dirty();
-
-      // Do the actual load (app’s callback prints its own details)
-      const char* path = s_idx.names[s_pendingIdx];
-      const bool ok = s_load(path);
-
-      // Final status line
-      view_print_line(ok ? "✓ Loaded" : "✗ Load failed");
-      view_flush_if_dirty();
-
-      if (ok && audioData && audioSampleCount > 0u) {
-        // Defer waveform display for ~1s (UX match)
-        s_tDelayUntil = millis() + 1000u;
-        s_state = DS_DELAY_TO_WAVEFORM;
-      } else {
-        // Failure: brief pause to let user read, then back to browser
-        delay(1000);
-        s_state = DS_BROWSER;
-        browser_render_sample_list();
-      }
-
-      // Consume the pending index
-      s_pendingIdx = -1;
-
-    } break;
-
-    case DS_DELAY_TO_WAVEFORM: {
-      if (millis() >= s_tDelayUntil) {
-        // Clear text view before grayscale draw
-        view_clear_log();
-        view_flush_if_dirty();
-
-        // Initialize and draw waveform
-        if (audioData && audioSampleCount > 0u) {
-          waveform_init((const int16_t*)audioData, audioSampleCount, currentWav.sampleRate);
-          waveform_draw();
-          s_state = DS_WAVEFORM;
-        } else {
-          // Safety net: nothing to draw; go back
-          s_state = DS_BROWSER;
-          browser_render_sample_list();
-        }
-      }
-    } break;
-
-    case DS_WAVEFORM:
-      // No periodic work right now
-      break;
-
-    case DS_BROWSER:
-    default:
-      // Nothing to do unless user turns/presses
-      break;
+// ────────────────────────── Timer Management ─────────────────────────────
+bool display_timer_begin(uint32_t fps) {
+  if (s_timerActive) {
+    return false;  // already running
   }
+  
+  if (fps == 0 || fps > 1000) {
+    return false;  // sanity check
+  }
+  
+  // Calculate period in microseconds
+  uint32_t period_us = 1000000u / fps;
+  
+  // Start repeating timer
+  if (!add_repeating_timer_us((int32_t)period_us, display_timer_isr, nullptr, &s_displayTimer)) {
+    return false;
+  }
+  
+  s_timerActive = true;
+  return true;
+}
+
+void display_timer_end(void) {
+  if (s_timerActive) {
+    cancel_repeating_timer(&s_displayTimer);
+    s_timerActive = false;
+    s_pendingUpdate = false;
+  }
+}
+
+void display_debug_list_files(void) {
+  FileIndex idx;
+  view_clear_log();
+  view_print_line("=== WAV Files ===");
+  if (!file_index_scan(idx)) {
+    view_print_line("SD scan failed");
+    view_flush_if_dirty();
+    return;
+  }
+  if (idx.count == 0) {
+    view_print_line("No WAV files found");
+    view_flush_if_dirty();
+    return;
+  }
+  const int max_print = (idx.count < 20) ? idx.count : 20;
+  for (int i = 0; i < max_print; ++i) {
+    char sizeBuf[16], line[96];
+    sd_format_size(idx.sizes[i], sizeBuf, sizeof(sizeBuf));
+    snprintf(line, sizeof(line), "%2d: %s  (%s)", i + 1, idx.names[i], sizeBuf);
+    view_print_line(line);
+  }
+  view_flush_if_dirty();
+}
+
+void display_debug_dump_q15(uint32_t n) {
+  if (!audioData || audioSampleCount == 0) {
+    view_print_line("No audio loaded");
+    view_flush_if_dirty();
+    return;
+  }
+  const int16_t* samples = (const int16_t*)audioData;
+  const uint32_t count   = (n > audioSampleCount) ? audioSampleCount : n;
+  char line[48];
+  view_print_line("=== Q15 Values ===");
+  for (uint32_t i = 0; i < count && i < 16u; ++i) {   // hard cap for safety
+    float normalized = samples[i] / 32768.0f;
+    snprintf(line, sizeof(line), "[%u]: %d (%.4f)", (unsigned)i, samples[i], normalized);
+    view_print_line(line);
+  }
+  view_flush_if_dirty();
 }
 
 } // namespace sf
