@@ -1,19 +1,16 @@
 #include <Arduino.h>
 #include "driver_sh1122.h"     // gray4_* API
 #include "driver_sdcard.h"     // FileIndex + file_index_scan(), sd_format_size()
+#include "ADCless.h"
 #include "ui_display.h"
 #include "storage_loader.h"    // extern audioData/audioSampleCount, etc.
 #include "storage_wav_meta.h"  // extern currentWav (for sampleRate)
 #include "sf_globals_bridge.h"
 #include <pico/time.h>         // pico-sdk timer API
+#include "adc_filter.h"
+#include "audio_engine.h"
 
 namespace sf {
-
-// ─────────────────────── Display constants (no heap) ─────────────────────
-static const uint8_t SHADE_BACKGROUND  = 0;   // 0..15 (SH1122 grayscale)
-static const uint8_t SHADE_WAVEFORM    = 12;
-static const uint8_t SHADE_DIM         = 4;   // reserved for future loop zone
-static const uint8_t SHADE_CENTERLINE  = 6;
 
 // ─────────────────────────── Browser state (UI) ──────────────────────────
 static FileIndex  s_idx;                // names[], sizes[], count
@@ -37,6 +34,139 @@ static bool              s_timerActive = false;    // track if timer is running
 
 // ────────────────────────── Forward declarations ─────────────────────────
 static void browser_render_sample_list(void);
+
+// ─────────────────────── Display constants (no heap) ─────────────────────
+static const uint8_t SHADE_BACKGROUND  = 0;   // 0..15 (SH1122 grayscale)
+static const uint8_t SHADE_WAVEFORM    = 12;
+static const uint8_t SHADE_DIM         = 4;   // reserved for future loop zone
+static const uint8_t SHADE_CENTERLINE  = 0;
+static const uint8_t SHADE_WAVEFORM_DIM = 4;  // NEW: dim waveform outside loop
+
+// ───────────────────────── Waveform cache & overlay helpers ───────────────
+// The waveform is drawn once; shading is overlaid on top each tick.
+static uint8_t s_wave_ymin[256];
+static uint8_t s_wave_ymax[256];
+static bool    s_wave_ready   = false;
+static int     s_lastStartPx  = -1;
+static int     s_lastEndPx    = -1;
+static int     s_lastPlayheadPx = -1; // Track previous cursor position
+
+static inline int adc12ToPx256(uint16_t v) {
+  // 12-bit ADC → 0..255 screen coordinate
+  return (v * 256) >> 12;
+}
+
+static inline void drawWaveColumn(int x, uint8_t y_min, uint8_t y_max, uint8_t shade) {
+  if (y_min > y_max) { uint8_t t = y_min; y_min = y_max; y_max = t; }
+  if (y_min == y_max) {
+    gray4_set_pixel(x, y_min, shade);
+  } else {
+    gray4_draw_vline(x, y_min, y_max, shade);
+  }
+}
+
+static inline void clearColumnToBackground(int x) {
+  gray4_draw_vline(x, 0, 64 - 1, SHADE_BACKGROUND);
+}
+
+static inline void restoreWaveColumn(int x, uint8_t shade) {
+  clearColumnToBackground(x);
+  drawWaveColumn(x, s_wave_ymin[x], s_wave_ymax[x], shade);
+}
+
+static inline void restoreWaveSpan(int x0, int x1, uint8_t shade) {
+  if (x0 > x1) return;
+  for (int x = x0; x <= x1; ++x) restoreWaveColumn(x, shade);
+}
+
+static inline void drawPlayheadCursor(int x) {
+  if (x >= 0 && x < 256) {
+    // Draw a bright vertical line for the playhead
+    gray4_draw_vline(x, 0, 64 - 1, 15);  // max brightness (15)
+  }
+}
+
+static inline void drawBoundaryLines(int start_px, int end_px) {
+  if (start_px >= 0 && start_px < 256) gray4_draw_vline(start_px, 0, 64 - 1, 8);
+  if (end_px   >= 0 && end_px   < 256) gray4_draw_vline(end_px,   0, 64 - 1, 8);
+}
+
+static void overlayLoopShadingTick() {
+  if (!s_wave_ready) return;
+
+  // Read the latest loop params
+  uint16_t loop_start_adc  = adc_filter_get(ADC_LOOP_START_CH);
+  uint16_t loop_length_adc = adc_filter_get(ADC_LOOP_LEN_CH);
+
+  int start_px  = adc12ToPx256(loop_start_adc);   // 0..255
+  int length_px = adc12ToPx256(loop_length_adc);  // 0..255
+  int end_px    = start_px + length_px;
+  if (end_px >= 256) end_px -= 256; // wrap to 0..255
+
+  // Calculate playhead position from phase (display-rate math, not audio-rate!)
+  int playhead_px = -1;
+  if (s_sampleCount > 0) {
+    uint64_t phase_snapshot = g_phase_q32_32;  // atomic read
+    uint64_t idx = phase_snapshot >> 32;       // get integer part
+    // Normalize to 0..255 pixels
+    playhead_px = (int)((idx * 256u) / s_sampleCount);
+    if (playhead_px > 255) playhead_px = 255;  // safety clamp
+  }
+
+  // Clear previous playhead cursor (restore the waveform at that column)
+  if (s_lastPlayheadPx >= 0 && s_lastPlayheadPx < 256) {
+    // Determine what shade this column should have based on loop region
+    uint8_t shade = SHADE_WAVEFORM_DIM;  // default to dim (outside loop)
+    
+    // Check if this column is inside the loop
+    if (end_px >= start_px) {
+      if (s_lastPlayheadPx >= start_px && s_lastPlayheadPx <= end_px) {
+        shade = SHADE_WAVEFORM;
+      }
+    } else {
+      // wrapped loop
+      if (s_lastPlayheadPx >= start_px || s_lastPlayheadPx <= end_px) {
+        shade = SHADE_WAVEFORM;
+      }
+    }
+    
+    restoreWaveColumn(s_lastPlayheadPx, shade);
+  }
+
+  // 1) Paint INSIDE the loop region at full shade (always)
+  if (end_px >= start_px) {
+    // contiguous
+    restoreWaveSpan(start_px, end_px, SHADE_WAVEFORM);
+  } else {
+    // wrap: [start..255] U [0..end]
+    restoreWaveSpan(start_px, 255, SHADE_WAVEFORM);
+    restoreWaveSpan(0, end_px,   SHADE_WAVEFORM);
+  }
+
+  // 2) Paint OUTSIDE the loop region at dim shade (always)
+  if (end_px >= start_px) {
+    if (start_px > 0)   restoreWaveSpan(0, start_px - 1, SHADE_WAVEFORM_DIM);
+    if (end_px < 255)   restoreWaveSpan(end_px + 1, 255, SHADE_WAVEFORM_DIM);
+  } else {
+    // wrap outside: (end+1 .. start-1) if there is space
+    if (end_px + 1 <= start_px - 1)
+      restoreWaveSpan(end_px + 1, start_px - 1, SHADE_WAVEFORM_DIM);
+  }
+
+  // 3) Boundary markers
+  drawBoundaryLines(start_px, end_px);
+
+  // 4) Draw playhead cursor (on top of everything)
+  if (playhead_px >= 0) {
+    drawPlayheadCursor(playhead_px);
+  }
+  s_lastPlayheadPx = playhead_px;
+
+  // 5) Flush
+  s_lastStartPx = start_px;
+  s_lastEndPx   = end_px;
+  gray4_send_buffer();
+}
 
 // ───────────────────────────── Timer ISR ─────────────────────────────────
 // Global ISR entry point (extern "C" so it's callable from anywhere)
@@ -74,6 +204,7 @@ void waveform_init(const int16_t* samples, uint32_t count, uint32_t sampleRate) 
   s_sampleRate  = sampleRate;
 }
 
+
 void waveform_draw(void) {
   gray4_clear(SHADE_BACKGROUND);
 
@@ -82,15 +213,15 @@ void waveform_draw(void) {
   const int mid = H / 2;
 
   if (!s_samples || s_sampleCount == 0) {
-    draw_center_line_if_empty();
+    gray4_draw_hline(0, W - 1, mid, SHADE_WAVEFORM);
+    s_wave_ready = false;
     gray4_send_buffer();
     return;
   }
 
-  // Peak estimate for vertical scale (simple clamp avoids divide-by-zero)
+  // Peak estimate for normalization
   int16_t peak = 1;
   {
-    // Very light scan for peak (every Nth sample) — no dynamic memory
     const uint32_t step = (s_sampleCount > 4096u) ? (s_sampleCount / 4096u) : 1u;
     int16_t maxabs = 1;
     for (uint32_t i = 0; i < s_sampleCount; i += step) {
@@ -98,13 +229,13 @@ void waveform_draw(void) {
       int16_t a = (v < 0) ? (int16_t)-v : v;
       if (a > maxabs) maxabs = a;
     }
-    peak = (maxabs < 128) ? 128 : maxabs;  // keep scale sane
+    peak = (maxabs < 128) ? 128 : maxabs;
   }
 
-  // Horizontal downsampling: samples-per-pixel
+  // samples-per-pixel
   const double spp = (double)s_sampleCount / (double)W;
 
-  // Column-wise min/max envelope
+  // Build envelope cache and draw the waveform at full shade
   for (int x = 0; x < W; ++x) {
     uint32_t start = (uint32_t)floor((double)x * spp);
     uint32_t end   = (uint32_t)floor((double)(x + 1) * spp);
@@ -112,15 +243,13 @@ void waveform_draw(void) {
     if (end <= start) end = start + 1;
     if (end > s_sampleCount) end = s_sampleCount;
 
-    int16_t cmin =  32767;
-    int16_t cmax = -32768;
+    int16_t cmin =  32767, cmax = -32768;
     for (uint32_t i = start; i < end; ++i) {
       int16_t v = s_samples[i];
       if (v < cmin) cmin = v;
       if (v > cmax) cmax = v;
     }
 
-    // Map Q15 → screen (top=0, bottom=H-1)
     int yMin = mid - ((int32_t)cmax * (H / 2)) / peak;
     int yMax = mid - ((int32_t)cmin * (H / 2)) / peak;
 
@@ -129,15 +258,21 @@ void waveform_draw(void) {
     if (yMax < 0)      yMax = 0;
     if (yMax > H - 1)  yMax = H - 1;
 
-    if (yMin == yMax) {
-      gray4_set_pixel(x, yMin, SHADE_WAVEFORM);
-    } else {
-      gray4_draw_vline(x, yMin, yMax, SHADE_WAVEFORM);
-    }
+    s_wave_ymin[x] = (uint8_t)yMin;
+    s_wave_ymax[x] = (uint8_t)yMax;
+
+    drawWaveColumn(x, s_wave_ymin[x], s_wave_ymax[x], SHADE_WAVEFORM);
   }
+
+  // reset loop overlay history so the first overlay tick repaints cleanly
+  s_lastStartPx = -1;
+  s_lastEndPx   = -1;
+  s_wave_ready  = true;
 
   gray4_send_buffer();
 }
+
+
 
 bool waveform_on_turn(int8_t /*inc*/) {
   // Any input exits to browser in current UX
@@ -161,6 +296,11 @@ void waveform_exit(void) {
 
 // ─────────────────────────── Browser rendering ───────────────────────────
 static void browser_render_sample_list() {
+
+
+  Serial.print("browser_render_sample_list from core ");
+  Serial.println(get_core_num());   // 0 or 1
+
   view_set_auto_scroll(false); // stop auto-scrolling while browsing
 
   view_clear_log();
@@ -204,9 +344,15 @@ void display_init(void) {
   s_top  = 0;
   s_pendingIdx = -1;
   s_pendingUpdate = false;
-  
+
   // Stay in DS_SETUP state - don't scan files or show browser yet
   s_state = DS_SETUP;
+
+  // Start display timer at 30 FPS (you can adjust this)
+  if (!display_timer_begin(30)) {
+    Serial.println("Warning: Failed to start display timer");
+    // Not fatal - display_tick() can still be called manually from loop()
+  }
 }
 
 void display_setup_complete(void) {
@@ -242,7 +388,7 @@ void display_tick(void) {
       if (s_pendingIdx < 0 || s_pendingIdx >= s_idx.count) {
         s_pendingIdx = -1;
         s_state = DS_BROWSER;
-        browser_render_sample_list();
+        //browser_render_sample_list();
         return;
       }
 
@@ -290,31 +436,46 @@ void display_tick(void) {
 
     case DS_DELAY_TO_WAVEFORM: {
       if (millis() >= s_tDelayUntil) {
-        // Clear text view before grayscale draw
+        // Clear text view before next view
         view_clear_log();
         view_flush_if_dirty();
 
-        // Initialize and draw waveform
+    #ifdef ADC_DEBUG
+        // Show ADC debug instead of waveform
+        adc_debug_init();
+        adc_debug_draw();
+        s_state = DS_ADC_DEBUG;
+    #else
+        // Normal waveform behavior
         if (audioData && audioSampleCount > 0u) {
           waveform_init((const int16_t*)audioData, audioSampleCount, currentWav.sampleRate);
           waveform_draw();
           s_state = DS_WAVEFORM;
         } else {
-          // Safety net: nothing to draw; go back
           s_state = DS_BROWSER;
           browser_render_sample_list();
         }
+    #endif
       }
     } break;
 
     case DS_WAVEFORM:
-      // Could add periodic waveform updates here if needed
+      overlayLoopShadingTick();
+      audio_engine_arm(true);
+      audio_engine_play(true);
       break;
 
     case DS_BROWSER:
     default:
       // Browser view is static until user interaction
       break;
+
+#ifdef ADC_DEBUG
+    case DS_ADC_DEBUG:
+      // Refresh ADC values periodically
+      adc_debug_draw();
+      break;
+#endif
   }
 }
 
@@ -453,5 +614,48 @@ void display_debug_dump_q15(uint32_t n) {
   }
   view_flush_if_dirty();
 }
+
+#ifdef ADC_DEBUG
+// ─────────────────────────── ADC Debug view ──────────────────────────────
+void adc_debug_init(void) {
+    // Nothing special needed for initialization
+}
+
+void adc_debug_draw(void) {
+    view_clear_log();
+    view_print_line("=== ADC Debug ===");
+    
+    // Display raw and normalized values for each ADC channel
+    for (int i = 0; i < NUM_ADC_INPUTS; i++) {
+        char line[64];
+        uint16_t raw_value = adc_results_buf[i];
+        snprintf(line, sizeof(line), "CH%d: %4d", i, raw_value);
+        view_print_line(line);
+    }
+    
+    view_print_line("Press button to exit");
+    view_flush_if_dirty();
+}
+
+bool adc_debug_on_turn(int8_t inc) {
+    // Ignore encoder input in ADC debug mode, or use it to exit
+    adc_debug_exit();
+    return false;
+}
+
+bool adc_debug_on_button(void) {
+    adc_debug_exit();
+    return false;
+}
+
+bool adc_debug_is_active(void) {
+    return s_state == DS_ADC_DEBUG;
+}
+
+void adc_debug_exit(void) {
+    s_state = DS_BROWSER;
+    browser_render_sample_list();  // switch back to browser view
+}
+#endif
 
 } // namespace sf

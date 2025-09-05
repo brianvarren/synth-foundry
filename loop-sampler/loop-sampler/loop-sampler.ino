@@ -12,6 +12,8 @@
 #include "ui_input.h"
 #include "storage_loader.h"
 #include "storage_wav_meta.h"
+#include "sf_globals_bridge.h"
+#include "audio_engine.h"
 
 using namespace sf;
 
@@ -44,10 +46,7 @@ void setup() {
   while(!Serial);
   delay(1000);
   Serial.println("\n=== Olimex Pico2-XXL Loop Sampler ===\n");
-  
-  // Initialize display hardware ONLY (stays in DS_SETUP state)
-  display_init();
-  
+
   // Now we can show status messages
   view_show_status("Loop Sampler", "Initializing");
   view_clear_log();
@@ -56,7 +55,7 @@ void setup() {
   view_print_line("Initializing...");
   view_flush_if_dirty();
   delay(500);
-  
+
   // PSRAM
   if (!initPSRAM()) {
     view_flush_if_dirty();
@@ -82,29 +81,55 @@ void setup() {
   // Initialize input system
   ui_input_init();
   
-  // Start display timer at 30 FPS (you can adjust this)
-  if (!display_timer_begin(30)) {
-    Serial.println("Warning: Failed to start display timer");
-    // Not fatal - display_tick() can still be called manually from loop()
-  }
+  // Initialize audio engine
+  audio_init();
+
+  // Set debug level for audio engine
+  audio_engine_debug_set_level(AE_DBG_INFO);  // or AE_DBG_ERR, AE_DBG_TRACE, AE_DBG_OFF
   
   // Signal that setup is complete - this will scan files and enter browser
-  display_setup_complete();
+  core0_publish_setup_done();
+}
+
+static uint32_t next_ms = 0;
+static const uint32_t kFrameIntervalMs = 16; // ~60 Hz
+
+void setup1(){
+  display_init();
 }
 
 // ───────────────────────── Arduino Loop ───────────────────────────────────
 void loop() {
+
+  audio_tick();
+  
+  static uint32_t last = 0;
+  if (millis() - last >= 250) {
+    last += 250;
+    Serial.print('.');
+    audio_engine_debug_poll();  // must be reachable
+    Serial.flush();
+  }
+}
+
+void loop1() {
+
+  static bool s_boot_done = false;
+
+  // Wait until core0 finished setup(), then enter browser once
+  if (!s_boot_done) {
+    if (g_core0_setup_done) {
+      display_setup_complete();              // calls file_index_scan + first render
+      s_boot_done = true;                    // guard: call only once
+    } else {
+      // keep core1 gentle while waiting
+      delayMicroseconds(200);
+    }
+    return;
+  }
+
   // Update input system
   ui_input_update();
 
-  // Display system tick - returns immediately if no update needed
   display_tick();
-
-  // Legacy scroll handling (if still needed)
-  view_handle_scroll(millis());
-  view_flush_if_dirty();
-
-  // Small delay to prevent CPU hogging
-  // (can be removed if timer ISR is handling all timing)
-  delay(1);
 }

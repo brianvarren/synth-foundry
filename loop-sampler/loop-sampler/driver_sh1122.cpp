@@ -5,6 +5,11 @@
 #include "config_pins.h"
 #include "driver_sh1122.h"
 
+#ifndef SH1122_SPI_DATA_HZ
+// Safe starting point; bump to 24–32 MHz if stable on your wiring
+#define SH1122_SPI_DATA_HZ 60000000u
+#endif
+
 namespace sf {
 
 // Single, private instance – no dynamic allocation
@@ -21,6 +26,17 @@ static int   s_scroll_offset   = 0;
 static bool  s_dirty           = true;
 static bool  s_auto_scroll     = true;
 static uint32_t s_last_scroll  = 0;
+
+// Send a block of display DATA bytes at a high SPI clock
+static inline void sh1122_write_data_burst(const uint8_t* src, size_t n) {
+  // Use the same SPI instance U8g2 bound to (Arduino SPI)
+  SPI.beginTransaction(SPISettings(SH1122_SPI_DATA_HZ, MSBFIRST, SPI_MODE0));
+  digitalWrite(DISP_DC, HIGH);   // data
+  digitalWrite(DISP_CS, LOW);    // select
+  SPI.transfer((void*)src, n);   // push n bytes in one go
+  digitalWrite(DISP_CS, HIGH);   // deselect
+  SPI.endTransaction();
+}
 
 void view_clear_log() {
   for (int i = 0; i < MAX_DISPLAY_LINES; ++i) s_lines[i][0] = '\0';
@@ -90,9 +106,17 @@ void view_flush_if_dirty() {
   if (!s_dirty) return;
   auto& g = sh1122_gfx();
   view_redraw_log(g);
+
+  Serial.print("view_flush_if_dirty from core ");
+  Serial.println(get_core_num());   // 0 or 1
+
 }
 
 void view_show_status(const char* title, const char* line2) {
+
+  Serial.print("view_show_status from core ");
+  Serial.println(get_core_num());   // 0 or 1
+
   auto& g = sh1122_gfx();
   g.clearBuffer();
   g.setFont(u8g2_font_6x12_tf);
@@ -103,6 +127,10 @@ void view_show_status(const char* title, const char* line2) {
 }
 
 void sh1122_init() {
+
+  Serial.print("sh1122_init from core ");
+  Serial.println(get_core_num());   // 0 or 1
+  
   // Hardware reset (safe on SH1122 boards)
   pinMode(DISP_RST, OUTPUT);
   digitalWrite(DISP_RST, HIGH); delay(5);
@@ -138,20 +166,17 @@ static inline void sh1122_set_row(U8G2& u8, uint8_t row) {
 }
 
 void sh1122_send_gray4(const uint8_t* buf_256x64_gray4) {
-  // Push one row (128 bytes) at a time
   U8G2& u8 = sh1122_gfx();
 
   for (uint8_t y = 0; y < 64; ++y) {
-    sh1122_set_row(u8, y);
-    sh1122_set_col0(u8);
+    sh1122_set_row(u8, y);     // U8g2 command path (cheap)
+    sh1122_set_col0(u8);       // U8g2 command path (cheap)
 
     const uint8_t* row = buf_256x64_gray4 + (uint16_t)y * 128u;
-    // A0=1 (data) is implied by 'd' below; write 128 bytes (256 pixels)
-    for (uint16_t i = 0; i < 128; ++i) {
-      u8.sendF("d", row[i]);   // each byte: high nibble = x&~1, low nibble = x|1
-    }
+    sh1122_write_data_burst(row, 128);  // <-- fast: one burst per row
   }
 }
+
 
 // === 4-bit Grayscale Drawing Functions ===
 
