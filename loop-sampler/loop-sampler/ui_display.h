@@ -1,19 +1,34 @@
 #pragma once
 #include <stdint.h>
 
+// #define ADC_DEBUG
+
 // Global ISR entry you can call from ANY timer/ISR source
 extern "C" void displayTimerCallback(void);
 
 namespace sf {
 
-// ─────────────────────────── Display FSM ────────────────────────────────
+// // ─────────────────────────── Display FSM ────────────────────────────────
+// enum DisplayState : uint8_t {
+//   DS_BOOT = 0,
+//   DS_SETUP,                    // NEW: showing setup status messages
+//   DS_BROWSER,
+//   DS_LOADING,
+//   DS_DELAY_TO_WAVEFORM,
+//   DS_WAVEFORM
+// };
+
+// Add ADC_DEBUG state to your enum
 enum DisplayState : uint8_t {
   DS_BOOT = 0,
-  DS_SETUP,                    // NEW: showing setup status messages
+  DS_SETUP,
   DS_BROWSER,
   DS_LOADING,
   DS_DELAY_TO_WAVEFORM,
   DS_WAVEFORM
+#ifdef ADC_DEBUG
+  ,DS_ADC_DEBUG         // Add ADC debug state
+#endif
 };
 
 DisplayState display_state(void);
@@ -26,6 +41,7 @@ bool waveform_on_button(void);
 void waveform_exit(void);
 
 // ───────────────────────── Top-level Display API ────────────────────────
+
 // Init hardware and prepare for setup messages
 void display_init(void);
 
@@ -46,5 +62,15 @@ void display_timer_end(void);
 // ───────────────────────── Debug helpers (optional) ─────────────────────
 void display_debug_list_files(void);        // prints a simple, non-interactive list
 void display_debug_dump_q15(uint32_t n);    // prints first N Q15 samples (max clamps)
+
+// Add ADC debug functions
+#ifdef ADC_DEBUG
+void adc_debug_init(void);
+void adc_debug_draw(void);
+bool adc_debug_on_turn(int8_t inc);
+bool adc_debug_on_button(void);
+void adc_debug_exit(void);
+bool adc_debug_is_active(void);
+#endif
 
 } // namespace sf

@@ -1,5 +1,6 @@
 #include <SdFat.h>
 #include <string.h>
+#include "audio_engine.h"
 #include "storage_loader.h"
 #include "storage_wav_meta.h"
 #include "driver_sh1122.h"
@@ -353,6 +354,16 @@ bool storage_load_sample_q15_psram(const char* path,
   audioData        = buf;
   audioDataSize    = written;
   audioSampleCount = written / 2u;
+
+  // Source (WAV) sample rate from WavInfo
+  const uint32_t src_rate_hz = wi.sampleRate;
+
+  // Your PWM/engine output rate. Replace with your symbol if different:
+  // e.g., DACless_get_sample_rate_hz(), AUDIO_OUT_RATE_HZ, or PWM_SAMPLE_RATE_HZ.
+  const uint32_t out_rate_hz = audio_rate;   // <-- use your project’s constant
+
+  // Tell the audio engine about the new PSRAM buffer and rates.
+  playback_bind_loaded_buffer(src_rate_hz, out_rate_hz, audioSampleCount);
 
   if (out_mbps)       *out_mbps = mbps;
   if (out_bytes_read) *out_bytes_read = written;

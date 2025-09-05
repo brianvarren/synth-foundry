@@ -1,0 +1,218 @@
+
+
+void process() {
+
+    uint32_t diag = AE_DIAG_NONE;
+
+    // Early outs: no buffer or not playing
+    if (s_state != AE_STATE_PLAYING || !g_samples_q15 || g_total_samples < 2) {
+        for (uint32_t i = 0; i < AUDIO_BLOCK_SIZE; ++i) out_buf_ptr[i] = 0;
+        
+        // Still update debug snapshot even when not playing
+        if (!g_samples_q15 || g_total_samples < 2) diag |= AE_DIAG_NO_BUFFER;
+        if (s_state != AE_STATE_PLAYING) diag |= AE_DIAG_STATE_NOT_PLAY;
+        
+        ae_dbg_snapshot_t snap;
+        snap.phase_q16_16  = g_phase_q16_16;
+        snap.idx           = 0;
+        snap.loop_start    = 0;
+        snap.loop_end      = 0;
+        snap.total_samples = g_total_samples;
+        snap.inc_q16_16    = g_inc_base_q16_16;
+        snap.inc_signed    = 0;
+        snap.xfade_len     = 0;
+        snap.playhead_u16  = 0;
+        snap.mode          = (uint8_t)s_mode;
+        snap.state         = (uint8_t)s_state;
+        snap.dir           = (int8_t)s_dir;
+        snap.diag_flags    = diag;
+        memcpy((void*)&s_last_snap, &snap, sizeof(snap));
+        
+        return;
+    }
+
+    // ── Snapshot ADCs (stable for this block) ─────────────────────────────────
+    uint16_t adc_start_raw  = adc_results_buf[ADC_LOOP_START_CH];
+    uint16_t adc_len_raw    = adc_results_buf[ADC_LOOP_LEN_CH];
+    uint16_t adc_xf_raw     = adc_results_buf[ADC_XFADE_LEN_CH];
+    uint16_t adc_tune_raw   = adc_results_buf[ADC_TUNE_CH];
+
+    // ── Map tune (control-rate) and compute block step ────────────────────────
+    uint32_t inc_q          = inc_from_adc_expo_LUT(adc_tune_raw, g_inc_base_q16_16);
+
+    // Turn it into a signed step based on s_dir
+    int32_t inc_signed = (s_dir >= 0) ? (int32_t)inc_q : -(int32_t)inc_q;
+
+    // ── Derive loop indices (control-rate; do per-sample only if needed) ──
+    uint32_t LSTART, LEND;
+    derive_loop_indices(adc_start_raw, adc_len_raw, g_total_samples, &LSTART, &LEND);
+    if (LEND <= LSTART + 1u) { LEND = (LSTART + 2u <= g_total_samples) ? (LSTART + 2u) : g_total_samples; }
+
+    // Clamp/wrap phase if outside new loop indices
+    uint32_t idx_now = (g_phase_q16_16 >> 16);
+    if (idx_now < LSTART || idx_now >= LEND) {
+        // reset to start; preserve the fractional for click-minimization
+        g_phase_q16_16 = (LSTART << 16) | (g_phase_q16_16 & 0xFFFFu);
+        diag |= AE_DIAG_IDX_OOB_CLAMPED;
+    }
+
+    // Cache locals & pointers
+    const int16_t* __restrict samples = g_samples_q15;
+    uint32_t phase_q                  = g_phase_q16_16;
+    const int32_t pm_scale_q          = g_pm_scale_q16_16;
+
+    // ── Variable crossfade length (linear weights, no per-sample divides) ─
+    // Map 12-bit ADC to [XF_MIN_SAMPLES .. XF_MAX_SAMPLES]
+    const uint32_t xf_span = (XF_MAX_SAMPLES > XF_MIN_SAMPLES) ? (XF_MAX_SAMPLES - XF_MIN_SAMPLES) : 0u;
+    uint32_t xfade_len     = XF_MIN_SAMPLES + ((uint32_t)adc_xf_raw * xf_span >> 12);  // 0..4095 -> span
+    if (xfade_len < 2u) xfade_len = 2u;   // guard (to avoid div by zero below)
+    if (xfade_len > (LEND - LSTART)) xfade_len = (LEND - LSTART);  // never exceed loop
+
+    // Precompute scale: w = ((pos * 65535) / (xfade_len-1)) via reciprocal multiply
+    // inv_den_q16 = ((1 << 16) / (xfade_len - 1))
+    const uint32_t inv_den_q16 = (uint32_t)(((uint64_t)1u << 32) / (uint64_t)(xfade_len - 1u)); // Q16 in high word
+    // w_scale_q16 = 65535 * inv_den_q16
+    const uint32_t w_scale_q16 = (uint32_t)(((uint64_t)65535u * inv_den_q16) >> 16);
+
+    // Optional fast constants
+    const uint32_t lend_minus1 = LEND - 1u;
+
+    // ── Debug ──────────────────────────────────────────────────
+    // Validate loop window
+    if (!(LEND > LSTART))                         diag |= AE_DIAG_LOOP_INVALID;
+
+    // Validate increment
+    if (inc_q == 0)                                diag |= AE_DIAG_ZERO_INC;
+
+    // Crossfade sanity (you already clamp; this just records it)
+    const uint32_t loop_len = (LEND > LSTART) ? (LEND - LSTART) : 0;
+    if (xfade_len > loop_len && loop_len)          diag |= AE_DIAG_XFADE_TOO_LARGE;
+
+    // Calculate normalized playhead for UI
+    uint16_t playhead_u16 = 0;
+    if (LEND > LSTART) {
+        uint32_t loop_pos = (idx_now >= LSTART && idx_now < LEND) ? (idx_now - LSTART) : 0;
+        playhead_u16 = (uint16_t)((loop_pos * 65535u) / (LEND - LSTART));
+    }
+
+    // ── Hot loop ───────────────────────────────────────────────────────────────
+    for (uint32_t i = 0; i < AUDIO_BLOCK_SIZE; ++i) {
+        //Serial.println("HELLO FROM THE HOT LOOP, WORM!!!");
+
+        // Audio-rate PM
+        const int16_t pm_q15 = adc12_to_q15_centered(adc_results_buf[ADC_PM_CH]);
+        const int32_t pm_delta_q = (int32_t)((int64_t)pm_q15 * (int64_t)pm_scale_q); // >>0 is no-op
+
+        // Advance phase with current signed inc
+        phase_q = (uint32_t)((int64_t)phase_q + (int64_t)inc_signed + (int64_t)pm_delta_q);
+
+        // Decode index/frac
+        uint32_t idx  = phase_q >> 16;
+        const uint32_t frac = phase_q & 0xFFFFu;
+
+        // ── Direction-aware boundary handling (NO pre-wrap before this) ───────────
+        if (s_dir >= 0) {
+            // FORWARD / ALTERNATE forward leg
+            if (idx >= LEND) {
+                uint32_t over = idx - LEND;
+
+                if (s_mode == AE_MODE_ALTERNATE) {
+                    // Reflect across the end boundary
+                    s_dir = -1;                        // flip direction
+                    inc_signed = -(int32_t)inc_q;      // use negative step from now on
+
+                    // Mirror index back into window
+                    idx = (over <= (LEND - LSTART - 1u))
+                        ? (lend_minus1 - over)
+                        : LSTART;                    // clamp if step was huge
+
+                    phase_q = (idx << 16) | frac;      // rebuild phase with same frac
+                    diag |= AE_DIAG_DIR_FLIPPED;
+                } else {
+                    // Pure FORWARD wrap
+                    phase_q = ((LSTART + over) << 16) | frac;
+                    idx     = lend_minus1;
+                }
+            }
+        } else {
+            // REVERSE / ALTERNATE reverse leg
+            if (idx < LSTART) {
+                uint32_t under = LSTART - idx;
+
+                if (s_mode == AE_MODE_ALTERNATE) {
+                    // Reflect across the start boundary
+                    s_dir = +1;
+                    inc_signed = (int32_t)inc_q;
+
+                    idx = (under <= (LEND - LSTART - 1u))
+                        ? (LSTART + under)
+                        : lend_minus1;
+
+                    phase_q = (idx << 16) | frac;
+                    diag |= AE_DIAG_DIR_FLIPPED;
+                } else {
+                    // Pure REVERSE wrap to the end side
+                    uint32_t new_idx = (under <= (LEND - LSTART))
+                                    ? (lend_minus1 - (under - 1u))
+                                    : lend_minus1;  // clamp if step was huge
+                    idx     = new_idx;
+                    phase_q = (idx << 16) | frac;
+                }
+            }
+        }
+
+        // ── Fetch ──────────────────────────────────────────────────────────────────
+        int16_t s = samples[idx];
+
+        // ── Boundary-aware crossfade (SKIP in ALTERNATE mode) ─────────────────────
+        if (s_mode != AE_MODE_ALTERNATE && xfade_len >= 2u) {
+            if (s_dir >= 0) {
+                // Approaching end (forward)
+                uint32_t dist = lend_minus1 - idx;
+                if (dist < xfade_len) {
+                    uint32_t pos  = (xfade_len - 1u) - dist;
+                    uint32_t bidx = LSTART + pos; if (bidx >= LEND) bidx = lend_minus1;
+                    int16_t  b    = samples[bidx];
+                    uint16_t w    = (uint16_t)(((uint64_t)pos * (uint64_t)w_scale_q16) >> 16);
+                    int32_t  mix  = (int32_t)s * (65535u - w) + (int32_t)b * w;
+                    s = (int16_t)(mix >> 16);
+                }
+            } else {
+                // Approaching start (reverse)
+                uint32_t dist = idx - LSTART;
+                if (dist < xfade_len) {
+                    uint32_t pos  = (xfade_len - 1u) - dist;
+                    uint32_t bidx = (lend_minus1) - pos; if (bidx < LSTART) bidx = LSTART;
+                    int16_t  b    = samples[bidx];
+                    uint16_t w    = (uint16_t)(((uint64_t)pos * (uint64_t)w_scale_q16) >> 16);
+                    int32_t  mix  = (int32_t)s * (65535u - w) + (int32_t)b * w;
+                    s = (int16_t)(mix >> 16);
+                }
+            }
+        }
+
+        // To PWM
+        out_buf_ptr[i] = q15_to_pwm_u(s);
+    }
+
+    g_phase_q16_16 = phase_q;
+
+    // Debug snapshot
+    ae_dbg_snapshot_t snap;
+    snap.phase_q16_16  = phase_q;
+    snap.idx           = (phase_q >> 16);
+    snap.loop_start    = LSTART;
+    snap.loop_end      = LEND;
+    snap.total_samples = g_total_samples;
+    snap.inc_q16_16    = inc_q;
+    snap.inc_signed    = inc_signed;
+    snap.xfade_len     = (uint16_t)xfade_len;
+    snap.playhead_u16  = playhead_u16;
+    snap.mode          = (uint8_t)s_mode;
+    snap.state         = (uint8_t)s_state;
+    snap.dir           = (int8_t)s_dir;
+    snap.diag_flags    = diag;
+
+    // Use memcpy to update volatile struct
+    memcpy((void*)&s_last_snap, &snap, sizeof(snap));
+}
