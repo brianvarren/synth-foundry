@@ -10,8 +10,9 @@
  * ## Key Features
  * 
  * **Real-time Crossfading**: When loop parameters change during playback,
- * the engine performs seamless crossfades between the old and new loop regions
- * to prevent audio glitches. This is essential for live performance.
+ * the engine performs seamless constant-power crossfades between the old and 
+ * new loop regions to prevent audio glitches and maintain consistent volume
+ * levels. This is essential for live performance.
  * 
  * **Pitch Control**: Supports both octave switching (via rotary switch) and
  * fine tuning (via ADC knob). Special LFO mode provides ultra-slow playback
@@ -268,11 +269,16 @@ void ae_render_block(const int16_t* samples,
       const int16_t a_q15 = sample_q15_from_phase(s_cf_tail_q, s_cf_tail_start, s_cf_tail_end);
       const int16_t b_q15 = sample_q15_from_phase(s_cf_head_q, s_cf_head_start, s_cf_head_end);
       
-      // Mix the two samples with linear crossfade
+      // Mix the two samples with constant power crossfade
       // As k increases, we fade from 'a' (old) to 'b' (new)
-      const int64_t mix_num = (int64_t)a_q15 * (int64_t)(N - 1u - k)  // Old sample weight
-                            + (int64_t)b_q15 * (int64_t)(k + 1u);      // New sample weight
-      const int16_t mix_q15 = (int16_t)(mix_num / (int64_t)N);
+      // Constant power crossfade uses sine curves to maintain constant power
+      const float t = (float)(k + 1u) / (float)N;  // Crossfade progress 0 to 1
+      const float fade_out = sinf(M_PI_2 * (1.0f - t));  // Old sample gain
+      const float fade_in = sinf(M_PI_2 * t);            // New sample gain
+      
+      const int64_t mix_num = (int64_t)((float)a_q15 * fade_out)  // Old sample weight
+                            + (int64_t)((float)b_q15 * fade_in);  // New sample weight
+      const int16_t mix_q15 = (int16_t)mix_num;
       out_buf_ptr[n] = q15_to_pwm_u(mix_q15);
       
       s_cf_tail_q += s_cf_inc_q;
@@ -336,8 +342,14 @@ void ae_render_block(const int16_t* samples,
       // Generate first crossfade sample (mix of old and new regions)
       const int16_t a0 = sample_q15_from_phase(s_cf_tail_q, s_cf_tail_start, s_cf_tail_end);
       const int16_t b0 = sample_q15_from_phase(s_cf_head_q, s_cf_head_start, s_cf_head_end);
-      const int64_t num0 = (int64_t)a0 * (int64_t)(steps - 1u) + (int64_t)b0;
-      out_buf_ptr[n] = q15_to_pwm_u((int16_t)(num0 / (int64_t)steps));
+      
+      // Constant power crossfade for first sample
+      const float t0 = 1.0f / (float)steps;  // First sample progress
+      const float fade_out0 = sinf(M_PI_2 * (1.0f - t0));  // Old sample gain
+      const float fade_in0 = sinf(M_PI_2 * t0);             // New sample gain
+      
+      const int64_t num0 = (int64_t)((float)a0 * fade_out0) + (int64_t)((float)b0 * fade_in0);
+      out_buf_ptr[n] = q15_to_pwm_u((int16_t)num0);
       
        s_cf_tail_q += s_cf_inc_q; s_cf_head_q += s_cf_inc_q;
       const uint64_t tail_end_q = ((uint64_t)s_cf_tail_end) << 32;
@@ -386,8 +398,14 @@ void ae_render_block(const int16_t* samples,
         // Generate first crossfade sample
         const int16_t a0 = sample_q15_from_phase(s_cf_tail_q, s_cf_tail_start, s_cf_tail_end);
         const int16_t b0 = sample_q15_from_phase(s_cf_head_q, s_cf_head_start, s_cf_head_end);
-        const int64_t num0 = (int64_t)a0 * (int64_t)(steps - 1u) + (int64_t)b0;
-        out_buf_ptr[n] = q15_to_pwm_u((int16_t)(num0 / (int64_t)steps));
+        
+        // Constant power crossfade for first sample
+        const float t0 = 1.0f / (float)steps;  // First sample progress
+        const float fade_out0 = sinf(M_PI_2 * (1.0f - t0));  // Old sample gain
+        const float fade_in0 = sinf(M_PI_2 * t0);             // New sample gain
+        
+        const int64_t num0 = (int64_t)((float)a0 * fade_out0) + (int64_t)((float)b0 * fade_in0);
+        out_buf_ptr[n] = q15_to_pwm_u((int16_t)num0);
         
         s_cf_tail_q += s_cf_inc_q; s_cf_head_q += s_cf_inc_q;
         const uint64_t tail_end_q = ((uint64_t)s_cf_tail_end) << 32;
