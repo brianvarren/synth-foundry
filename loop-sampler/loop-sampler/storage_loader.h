@@ -1,3 +1,41 @@
+/**
+ * @file storage_loader.h
+ * @brief Audio file loading and storage management system
+ * 
+ * This header defines the interface for loading and managing audio samples
+ * from SD card storage. The system handles WAV file decoding, normalization,
+ * and conversion to the internal Q15 format used by the audio engine.
+ * 
+ * ## Key Features
+ * 
+ * **Multi-format WAV Support**: Handles 8/16/24/32-bit PCM WAV files in
+ * mono or stereo format. All files are converted to mono Q15 format for
+ * consistent processing.
+ * 
+ * **Two-pass Normalization**: 
+ * - Pass 1: Scans entire file to find peak amplitude
+ * - Pass 2: Converts to mono, normalizes to -3dB, outputs as Q15
+ * 
+ * **PSRAM Integration**: Automatically allocates PSRAM buffers for large
+ * samples and manages memory efficiently.
+ * 
+ * **File Indexing**: Scans SD card for WAV files and maintains an index
+ * for fast browsing and selection.
+ * 
+ * ## Audio Processing Pipeline
+ * 
+ * 1. **File Discovery**: Scan SD card for *.wav files (case-insensitive)
+ * 2. **Metadata Extraction**: Read WAV headers to get sample rate, bit depth, channels
+ * 3. **Peak Detection**: First pass to find maximum amplitude for normalization
+ * 4. **Conversion**: Second pass converts to mono Q15 with -3dB normalization
+ * 5. **PSRAM Storage**: Allocates PSRAM buffer and stores converted samples
+ * 6. **Engine Binding**: Binds sample to audio engine for playback
+ * 
+ * @author Brian Varren
+ * @version 1.0
+ * @date 2024
+ */
+
 #pragma once
 #include <stdint.h>
 

@@ -35,7 +35,8 @@ void unmuteAudioOutput() {
 
 void PWM_DMATransCpltCallback(){
     uint32_t pending = dma_hw->ints1;  // Get all pending interrupts on IRQ 1
-
+    uint32_t timestamp_us = time_us_32();
+    
     // Handle the interrupt for channel A
     if (pending & (1u << dma_chan_a)) {
         dma_hw->ints1 = 1u << dma_chan_a; // clear the interrupt request

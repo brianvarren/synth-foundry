@@ -16,4 +16,7 @@ void ui_encoder_button_press_callback(EEncoder& enc);
 void ui_input_init();
 void ui_input_update();
 
+// Function to get current octave switch position for audio engine
+uint8_t ui_get_octave_position();
+
 } // namespace ui_input

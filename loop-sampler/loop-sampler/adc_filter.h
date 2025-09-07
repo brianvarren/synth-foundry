@@ -1,16 +1,57 @@
+/**
+ * @file adc_filter.h
+ * @brief ADC input filtering system for smooth control processing
+ * 
+ * This header provides a sophisticated filtering system for analog control inputs
+ * to prevent audio artifacts from knob jitter and electrical noise. The system
+ * uses exponential moving average (EMA) filters with optional median-of-3
+ * prefiltering for robust, real-time control processing.
+ * 
+ * ## Filtering Features
+ * 
+ * **Exponential Moving Average (EMA)**: Smooths control inputs using integer-only
+ * arithmetic for consistent performance. The smoothing amount is controlled by
+ * a shift parameter (0 = no smoothing, 15 = heavy smoothing).
+ * 
+ * **Median-of-3 Prefiltering**: Optional spike removal that eliminates single-sample
+ * noise spikes that can cause audio artifacts. Uses a 3-sample median filter
+ * on each channel independently.
+ * 
+ * **Real-time Performance**: All filtering operations use integer arithmetic and
+ * are optimized for real-time audio processing. No heap allocation or floating-point
+ * operations in the hot path.
+ * 
+ * ## Filter Configuration
+ * 
+ * The system supports both simple shift-based configuration and frequency-based
+ * configuration using cutoff frequencies and time constants. This allows for
+ * precise tuning of filter characteristics for different control types.
+ * 
+ * @author Brian Varren
+ * @version 1.0
+ * @date 2024
+ */
+
 #pragma once
 #include <stdint.h>
 #include <math.h>   // only used by setCutoffHz / setTauMs (not in hot path)
 
 /**
- * AdcEmaFilter
- * - EMA with alpha = 1 / (2^smoothing_shift)  -> y += (x - y) >> shift
- * - Optional median-of-3 prefilter to kill single-sample spikes
- * - All integer math in process(); no heap; O(1)
- *
- * Conventions:
- *  - Class/methods: camelCase
- *  - Variables:     lowercase_underscores
+ * @class AdcEmaFilter
+ * @brief Exponential Moving Average filter for ADC input smoothing
+ * 
+ * This class implements an EMA filter with the formula:
+ * y += (x - y) >> shift
+ * 
+ * Where:
+ * - x is the input sample (0..4095)
+ * - y is the filtered output
+ * - shift controls smoothing (0 = no smoothing, 15 = heavy smoothing)
+ * 
+ * The filter also supports optional median-of-3 prefiltering to eliminate
+ * single-sample noise spikes that can cause audio artifacts.
+ * 
+ * All operations use integer arithmetic for consistent real-time performance.
  */
 
 class AdcEmaFilter {
@@ -86,12 +127,15 @@ private:
   uint16_t m0, m1;            // last two raw samples
 };
 
-/* ─────────────────────── Centralized filter API ──────────────────────────
-   One module-level bank of filters for every ADC channel.
-   Call adc_filter_update_from_dma() at a fixed cadence (e.g., your display
-   timer ISR or once-per-audio-block) to update all channels from adc_results_buf[].
-   Then read with adc_filter_get(ch) anywhere (audio/display).
-*/
+// ── Centralized Filter API ────────────────────────────────────────────────────
+// The system provides a centralized bank of filters for all ADC channels.
+// This allows consistent filtering across the entire system while maintaining
+// real-time performance.
+//
+// Usage Pattern:
+// 1. Call adc_filter_update_from_dma() at regular intervals (e.g., audio block rate)
+// 2. Read filtered values with adc_filter_get(ch) from anywhere in the system
+// 3. All filtering is done in the background with no blocking operations
 
 // Configure all channels at once.
 // median3_mask: bit i enables median-of-3 on channel i (1=on).
