@@ -17,3 +17,6 @@
 #define DISP_CS     5
 #define DISP_SCL    6
 #define DISP_SDA    7
+
+// ─────────────────────── Reset Trigger ───────────────────────
+#define RESET_TRIGGER_PIN 18  // GPIO18 for tempo sync reset trigger

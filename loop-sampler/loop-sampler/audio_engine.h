@@ -74,6 +74,9 @@ extern int32_t g_pm_scale_q16_16;
 // Live playhead position normalized to the current loop, 0..65535.
 extern volatile uint16_t g_playhead_norm_u16;
 
+// Reset trigger state
+extern volatile bool g_reset_trigger_pending;
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────
 
 // Initializes tables and PWM DMA (expects your DACless/ADCless to be linkable)
@@ -95,6 +98,11 @@ void audio_engine_arm(bool armed);            // armed=true => READY; false => I
 void audio_engine_play(bool play);            // play=true => PLAYING, false => PAUSED
 ae_state_t audio_engine_get_state(void);
 ae_mode_t  audio_engine_get_mode(void);
+
+// ── Reset trigger control ─────────────────────────────────────────────
+void audio_engine_reset_trigger_init(void);  // Initialize GPIO18 for reset trigger
+void audio_engine_reset_trigger_poll(void);  // Poll for reset trigger (call from main loop)
+void audio_engine_reset_trigger_handle(void); // Handle pending reset trigger
 
 
                                  // Fill the current PWM DMA half-buffer. Assumes:

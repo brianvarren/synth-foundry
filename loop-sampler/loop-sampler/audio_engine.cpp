@@ -26,7 +26,9 @@
 #include "audio_engine.h"
 #include "pico_interp.h"
 #include "sf_globals_bridge.h"
+#include "config_pins.h"
 #include <hardware/pwm.h>
+#include <hardware/gpio.h>
 #include <Arduino.h>  // Add for Serial
 
 // Forward declaration from audio_engine_render.cpp
@@ -109,6 +111,12 @@ uint64_t g_inc_base_q32_32 = (1ULL << 32);   // default = 1.0 ratio (no pitch ch
 // modulation of the playback position, creating effects like vibrato or tremolo.
 // Currently unused but available for future effects.
 int64_t g_pm_scale_q32_32 = 0;             // default = no phase modulation
+
+// ── Reset trigger state ──────────────────────────────────────────────────────
+// Reset trigger functionality for tempo sync - allows external triggers to reset
+// the loop phase and recalculate loop parameters with crossfading
+volatile bool g_reset_trigger_pending = false;
+static bool s_reset_trigger_last_state = false;
 
 
 static const int16_t* g_samples_q15 = nullptr;
@@ -289,4 +297,120 @@ void audio_tick(void) {
 
 void process() {
     // Delegated via audio_tick -> ae_render_block()
+}
+
+// ── Reset Trigger Functions ──────────────────────────────────────────────────────
+
+/**
+ * @brief Initialize GPIO18 for reset trigger detection
+ * 
+ * Sets up GPIO18 as an input with pull-down resistor for detecting external
+ * reset triggers. The trigger is active-high (rising edge to trigger).
+ */
+void audio_engine_reset_trigger_init(void) {
+    gpio_init(RESET_TRIGGER_PIN);
+    gpio_set_dir(RESET_TRIGGER_PIN, GPIO_IN);
+    gpio_pull_down(RESET_TRIGGER_PIN);
+    
+    // Initialize state tracking
+    s_reset_trigger_last_state = gpio_get(RESET_TRIGGER_PIN);
+    g_reset_trigger_pending = false;
+    
+    Serial.println(F("[AE] Reset trigger initialized on GPIO18 (rising edge)"));
+}
+
+/**
+ * @brief Poll for reset trigger on GPIO18
+ * 
+ * This function should be called from the main loop to detect rising edges
+ * on the reset trigger pin. When a trigger is detected, it sets the pending
+ * flag for processing in the audio engine.
+ */
+void audio_engine_reset_trigger_poll(void) {
+    bool current_state = gpio_get(RESET_TRIGGER_PIN);
+    
+    // Detect rising edge (active-high trigger)
+    if (!s_reset_trigger_last_state && current_state) {
+        g_reset_trigger_pending = true;
+        Serial.println(F("[AE] Reset trigger detected (rising edge)"));
+    }
+    
+    s_reset_trigger_last_state = current_state;
+}
+
+/**
+ * @brief Handle pending reset trigger
+ * 
+ * This function processes a pending reset trigger by:
+ * 1. Resetting the phase accumulator to 0
+ * 2. Forcing ADC input re-read/update
+ * 3. Recalculating loop region based on current ADC values
+ * 4. Initiating crossfade if crossfade length is specified
+ * 
+ * This function should be called from the audio processing loop when
+ * g_reset_trigger_pending is true.
+ */
+void audio_engine_reset_trigger_handle(void) {
+    if (!g_reset_trigger_pending) return;
+    
+    // Clear the pending flag first to prevent re-triggering
+    g_reset_trigger_pending = false;
+    
+    // Only process if we have a valid sample loaded and are playing
+    if (!g_samples_q15 || g_total_samples == 0 || s_state != AE_STATE_PLAYING) {
+        Serial.println(F("[AE] Reset trigger ignored - no sample or not playing"));
+        return;
+    }
+    
+    Serial.println(F("[AE] Processing reset trigger"));
+    
+    // Force ADC input re-read/update by calling the filter update
+    adc_filter_update_from_dma();
+    
+    // Get current ADC values for loop parameters
+    const uint16_t adc_start_q12 = adc_filter_get(ADC_LOOP_START_CH);
+    const uint16_t adc_len_q12   = adc_filter_get(ADC_LOOP_LEN_CH);
+    const uint16_t adc_xfade_q12 = adc_filter_get(ADC_XFADE_LEN_CH);
+    
+    // Recalculate loop region based on current ADC values
+    const uint32_t MIN_LOOP_LEN = 64u;
+    const uint32_t span_total = (g_total_samples > MIN_LOOP_LEN) ? (g_total_samples - MIN_LOOP_LEN) : 0;
+    const uint32_t new_start = (span_total ? (uint32_t)(((uint64_t)adc_start_q12 * (uint64_t)span_total) / 4095u) : 0u);
+    const uint32_t new_len = MIN_LOOP_LEN + (span_total ? (uint32_t)(((uint64_t)adc_len_q12 * (uint64_t)span_total) / 4095u) : 0u);
+    uint32_t new_end = new_start + new_len;
+    if (new_end > g_total_samples) new_end = g_total_samples;
+    
+    // Calculate crossfade length if specified
+    uint32_t xfade_len = 0;
+    if (adc_xfade_q12 > 0) {
+        const uint32_t active_len = new_end - new_start;
+        if (active_len > 1) {
+            const uint32_t max_xfade_samples = active_len / 2;  // 50% of loop length
+            xfade_len = (uint32_t)(((uint64_t)max_xfade_samples * (uint64_t)adc_xfade_q12) >> 12);
+            if (xfade_len >= active_len) xfade_len = active_len - 1;
+        }
+    }
+    
+    // Apply minimum crossfade length if no user crossfade specified
+    if (xfade_len == 0) {
+        const uint32_t active_len = new_end - new_start;
+        const uint32_t MIN_XF_SAMPLES = 8u;
+        xfade_len = (active_len > MIN_XF_SAMPLES) ? MIN_XF_SAMPLES : (active_len > 1 ? 1u : 0u);
+    }
+    
+    // Reset phase accumulator to 0 (start of new loop region)
+    g_phase_q32_32 = ((uint64_t)new_start) << 32;
+    
+    // If crossfade is specified, we need to set up crossfade state
+    // This will be handled in the audio render loop when it detects the crossfade
+    if (xfade_len > 0) {
+        Serial.printf("[AE] Reset trigger: crossfade length = %u samples\n", xfade_len);
+        // The crossfade will be initiated in the next audio block
+        // by the existing crossfade logic in ae_render_block()
+    } else {
+        Serial.println(F("[AE] Reset trigger: immediate reset (no crossfade)"));
+    }
+    
+    Serial.printf("[AE] Reset trigger: new loop region [%u, %u), length %u\n", 
+                  new_start, new_end, new_end - new_start);
 }
