@@ -26,6 +26,7 @@
  * - **Crossfading**: Seamless transitions when changing loop parameters
  * - **Pitch Shifting**: Octave switching + fine tune control
  * - **LFO Mode**: Ultra-slow playback for creating evolving textures
+ * - **Reset Trigger**: GPIO18 input for tempo sync and loop reset with crossfading
  * - **PSRAM Storage**: Large sample buffers (up to 8MB) for long recordings
  * - **Q15 Audio Processing**: Fixed-point DSP for consistent performance
  * 
@@ -37,6 +38,7 @@
  * - Rotary encoder with button
  * - 8-position rotary switch for octave selection
  * - 7 analog control inputs (pots/knobs)
+ * - Reset trigger input (GPIO18) for tempo sync
  * 
  * ## Audio Engine Details
  * 
@@ -45,6 +47,17 @@
  * - Linear interpolation between samples for smooth playback
  * - Real-time crossfading when loop parameters change
  * - PWM output at configurable sample rate for high-quality audio
+ * 
+ * ## Reset Trigger System
+ * 
+ * The reset trigger on GPIO18 provides tempo sync functionality:
+ * - Active-high trigger (rising edge to reset)
+ * - Resets phase accumulator to loop start position
+ * - Forces re-read of all ADC inputs for current loop parameters
+ * - Recalculates loop region based on current knob positions
+ * - Initiates seamless crossfade from current playhead to loop start
+ * - Enables smooth tempo-synchronized loop resets without audio glitches
+ * - Crossfade quality is independent of loop length or timing
  * 
  * @author Brian Varren
  * @version 1.0
@@ -169,6 +182,9 @@ void setup() {
   
   // Initialize audio engine (PWM output, DMA, interpolation tables)
   audio_init();
+  
+  // Initialize reset trigger on GPIO18
+  audio_engine_reset_trigger_init();
 
   // Signal to Core 1 that setup is complete - this triggers file scanning
   // and browser initialization on the display core
@@ -204,6 +220,9 @@ void loop() {
   // Process audio engine - this handles the main audio processing loop
   // including sample playback, crossfading, and control input processing
   audio_tick();
+  
+  // Poll for reset trigger on GPIO18
+  audio_engine_reset_trigger_poll();
   
   // Debug output (currently disabled to maintain real-time performance)
   static uint32_t last = 0;

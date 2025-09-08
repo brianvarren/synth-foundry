@@ -48,6 +48,9 @@
 #include "ui_input.h"
 #include <Arduino.h>
 
+// Forward declaration for reset trigger handling
+extern volatile bool g_reset_trigger_pending;
+
 // Forward declaration for the global base increment
 extern uint64_t g_inc_base_q32_32;
 
@@ -84,7 +87,6 @@ static uint32_t s_cf_tail_start  = 0;  // Tail region start
 static uint32_t s_cf_tail_end    = 0;  // Tail region end
 static uint32_t s_cf_head_start  = 0;  // Head region start
 static uint32_t s_cf_head_end    = 0;  // Head region end
-static uint64_t s_cf_inc_q       = 0;  // Phase increment during crossfade
 
 
 
@@ -121,6 +123,109 @@ void ae_render_block(const int16_t* samples,
     const uint16_t len_q12   = (uint16_t)(((uint64_t)((s_active_end > s_active_start) ? (s_active_end - s_active_start) : 0) * 4095u) / (uint64_t)total);
     publish_display_state2(start_q12, len_q12, 0, total, 0, 0);
     return;
+  }
+
+  // ── Handle Reset Trigger ──────────────────────────────────────────────────────
+  // Check for pending reset trigger and handle it if present
+  if (g_reset_trigger_pending) {
+    // Force ADC input re-read/update
+    adc_filter_update_from_dma();
+    
+    // Get current ADC values for loop parameters
+    const uint16_t adc_start_q12 = adc_filter_get(ADC_LOOP_START_CH);
+    const uint16_t adc_len_q12   = adc_filter_get(ADC_LOOP_LEN_CH);
+    const uint16_t adc_xfade_q12 = adc_filter_get(ADC_XFADE_LEN_CH);
+    
+    // Recalculate loop region based on current ADC values
+    const uint32_t MIN_LOOP_LEN = 64u;
+    const uint32_t span_total = (total_samples > MIN_LOOP_LEN) ? (total_samples - MIN_LOOP_LEN) : 0;
+    const uint32_t new_start = (span_total ? (uint32_t)(((uint64_t)adc_start_q12 * (uint64_t)span_total) / 4095u) : 0u);
+    const uint32_t new_len = MIN_LOOP_LEN + (span_total ? (uint32_t)(((uint64_t)adc_len_q12 * (uint64_t)span_total) / 4095u) : 0u);
+    uint32_t new_end = new_start + new_len;
+    if (new_end > total_samples) new_end = total_samples;
+    
+    // Calculate crossfade length from XFADE knob - absolute value, not percentage
+    uint32_t xfade_len = 0;
+    if (adc_xfade_q12 > 0) {
+      // Map XFADE knob (0-4095) to absolute crossfade length (0-1024 samples)
+      // This gives about 0-23ms crossfade at 44.1kHz, independent of loop length
+      const uint32_t MAX_XFADE_SAMPLES = 1024u;  // Maximum crossfade length in samples
+      xfade_len = (uint32_t)(((uint64_t)MAX_XFADE_SAMPLES * (uint64_t)adc_xfade_q12) >> 12);
+      if (xfade_len == 0) xfade_len = 1;  // Minimum 1 sample when knob is turned up
+    }
+    
+    // Apply minimum crossfade length only when XFADE knob is at zero
+    if (xfade_len == 0) {
+      const uint32_t MIN_XF_SAMPLES = 64u;  // Minimum crossfade when knob is off
+      xfade_len = MIN_XF_SAMPLES;
+    }
+    
+    // Store current and new loop region boundaries for crossfade
+    const uint32_t old_start = s_active_start;  // Current loop start
+    const uint32_t old_end   = s_active_end;    // Current loop end
+    
+    // Update active loop region to new region
+    s_active_start = new_start;
+    s_active_end   = new_end;
+    
+    // If crossfade is specified, set up crossfade state for smooth transition
+    if (xfade_len > 0) {
+      // Get current playback position for "right now" crossfade
+      uint32_t current_pos = (uint32_t)((*io_phase_q32_32) >> 32);
+      
+      // Elegant approach: crossfade from current playhead to loop start
+      // This creates a seamless transition regardless of loop length or timing
+      s_cf_tail_start = current_pos;  // Start from current position (fading out)
+      s_cf_tail_end = current_pos + xfade_len;  // End after crossfade length (truly independent!)
+      s_cf_head_start = new_start;    // Start from new loop start (fading in)
+      s_cf_head_end = new_end;        // End at new loop end
+      
+      // Start both playheads from their respective start positions
+      s_cf_tail_q = *io_phase_q32_32;  // Current playhead position (continues forward)
+      s_cf_head_q = ((uint64_t)new_start) << 32;  // New loop start position
+      
+      // Calculate number of crossfade steps based on crossfade length and current pitch
+      const uint16_t adc_tune_q12 = adc_filter_get(ADC_TUNE_CH);
+      const uint8_t octave_pos = sf::ui_get_octave_position();
+      float t_norm = ((float)adc_tune_q12 - 2048.0f) / 2048.0f;
+      if (t_norm < -1.0f) t_norm = -1.0f; if (t_norm > 1.0f) t_norm = 1.0f;
+      
+      float ratio_f;
+      if (octave_pos == 0) {
+        const float lfo_min_ratio = 0.001f;
+        const float lfo_max_ratio = 1.0f;
+        ratio_f = lfo_min_ratio + (1.0f - t_norm) * 0.5f * (lfo_max_ratio - lfo_min_ratio);
+      } else {
+        const int octave_shift = (int)octave_pos - 4;
+        const float octave_ratio = exp2f((float)octave_shift);
+        const float tune_ratio = exp2f(t_norm * 0.5f);
+        ratio_f = octave_ratio * tune_ratio;
+      }
+      
+      uint64_t INC = (uint64_t)(ratio_f * (double)(1ULL << 32));
+      if (INC < (1ULL << 28)) INC = (1ULL << 28);
+      if (INC > (1ULL << 36)) INC = (1ULL << 36);
+      
+      const uint64_t num = ((uint64_t)xfade_len) << 32;
+      uint32_t steps = (uint32_t)((num + (INC - 1)) / INC);
+      if (steps == 0) steps = 1;
+      
+      s_cf_steps_total = steps;
+      s_cf_steps_rem   = steps;
+      
+      // Clear the pending flag
+      g_reset_trigger_pending = false;
+      
+      // Reset phase to start of new region
+      *io_phase_q32_32 = ((uint64_t)new_start) << 32;
+      
+      // Continue with crossfade processing in the main loop below
+    } else {
+      // No crossfade - immediate reset
+      *io_phase_q32_32 = ((uint64_t)new_start) << 32;
+      s_cf_steps_rem = 0;  // Clear any existing crossfade
+      g_reset_trigger_pending = false;
+    }
   }
 
   loop_mapper_recalc_spans(total_samples);
@@ -286,8 +391,8 @@ void ae_render_block(const int16_t* samples,
       out_buf_ptr_L[n] = crossfade_pwm;
       out_buf_ptr_R[n] = crossfade_pwm;
       
-      s_cf_tail_q += s_cf_inc_q;
-      s_cf_head_q += s_cf_inc_q;
+      s_cf_tail_q += INC;
+      s_cf_head_q += INC;
       
       // Clamp playheads to their region boundaries
       const uint64_t tail_end_q = ((uint64_t)s_cf_tail_end) << 32;
@@ -335,11 +440,10 @@ void ae_render_block(const int16_t* samples,
       s_cf_head_start = new_start; s_cf_head_end = new_end;  // New region (fading in)
       s_cf_tail_q   = ((uint64_t)(old_end - xf_len)) << 32;  // Start from end of old region
       s_cf_head_q   = ((uint64_t)new_start)          << 32;  // Start from beginning of new region
-      s_cf_inc_q    = INC;  // Use current pitch increment
       
       // Calculate number of crossfade steps based on crossfade length and pitch
       const uint64_t num = ((uint64_t)xf_len) << 32;
-      uint32_t steps = (uint32_t)((num + (s_cf_inc_q - 1)) / s_cf_inc_q);
+      uint32_t steps = (uint32_t)((num + (INC - 1)) / INC);
       if (steps == 0) steps = 1;  // Minimum 1 step
       s_cf_steps_total = steps;
       s_cf_steps_rem   = steps;
@@ -358,7 +462,7 @@ void ae_render_block(const int16_t* samples,
       out_buf_ptr_L[n] = crossfade_pwm;
       out_buf_ptr_R[n] = crossfade_pwm;
       
-       s_cf_tail_q += s_cf_inc_q; s_cf_head_q += s_cf_inc_q;
+       s_cf_tail_q += INC; s_cf_head_q += INC;
       const uint64_t tail_end_q = ((uint64_t)s_cf_tail_end) << 32;
       const uint64_t head_end_q = ((uint64_t)s_cf_head_end) << 32;
       if (s_cf_tail_q >= tail_end_q) s_cf_tail_q = tail_end_q - 1;
@@ -393,11 +497,10 @@ void ae_render_block(const int16_t* samples,
         s_cf_head_start = new_start; s_cf_head_end = new_end;  // New region (fading in)
         s_cf_tail_q = ((uint64_t)(old_end - xf_len)) << 32;   // Start from end of old region
         s_cf_head_q = ((uint64_t)new_start)          << 32;   // Start from beginning of new region
-        s_cf_inc_q  = INC;  // Use current pitch increment
         
         // Calculate crossfade steps
         const uint64_t num = ((uint64_t)xf_len) << 32;
-        uint32_t steps = (uint32_t)((num + (s_cf_inc_q - 1)) / s_cf_inc_q);
+        uint32_t steps = (uint32_t)((num + (INC - 1)) / INC);
         if (steps == 0) steps = 1;  // Minimum 1 step
         s_cf_steps_total = steps;
         s_cf_steps_rem   = steps;
@@ -416,7 +519,7 @@ void ae_render_block(const int16_t* samples,
         out_buf_ptr_L[n] = crossfade_pwm;
         out_buf_ptr_R[n] = crossfade_pwm;
         
-        s_cf_tail_q += s_cf_inc_q; s_cf_head_q += s_cf_inc_q;
+        s_cf_tail_q += INC; s_cf_head_q += INC;
         const uint64_t tail_end_q = ((uint64_t)s_cf_tail_end) << 32;
         const uint64_t head_end_q = ((uint64_t)s_cf_head_end) << 32;
         if (s_cf_tail_q >= tail_end_q) s_cf_tail_q = tail_end_q - 1;
