@@ -32,6 +32,7 @@ enum DisplayState : uint8_t {
 };
 
 DisplayState display_state(void);
+void display_set_state(DisplayState st);
 
 // Waveform subview (kept public; you don't call these from the sketch)
 void waveform_init(const int16_t* samples, uint32_t count, uint32_t sampleRate);
@@ -39,6 +40,8 @@ void waveform_draw(void);
 bool waveform_on_turn(int8_t inc);
 bool waveform_on_button(void);
 void waveform_exit(void);
+bool waveform_is_active(void);
+void waveform_overlay_tick(void);
 
 // ───────────────────────── Top-level Display API ────────────────────────
 

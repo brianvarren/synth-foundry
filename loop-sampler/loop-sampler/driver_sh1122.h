@@ -1,3 +1,46 @@
+/**
+ * @file driver_sh1122.h
+ * @brief SH1122 OLED display driver and graphics system
+ * 
+ * This header provides the interface for the SH1122 OLED display (256x64 pixels).
+ * The display system supports both text-based UI and graphics rendering, including
+ * waveform visualization and real-time audio parameter display.
+ * 
+ * ## Display Features
+ * 
+ * **High Resolution**: 256x64 pixel OLED display with 4-bit grayscale support
+ * - 16 shades of gray (0=black, 15=white)
+ * - Fast SPI communication for real-time updates
+ * - Low power consumption suitable for portable devices
+ * 
+ * **Dual Rendering Modes**:
+ * - **Text Mode**: Scrolling log view for status messages and file browsing
+ * - **Graphics Mode**: Waveform visualization and parameter displays
+ * 
+ * **Real-time Updates**: Display updates at ~60Hz independently of audio processing
+ * to maintain responsive user interface.
+ * 
+ * ## Graphics API
+ * 
+ * The system provides both high-level text functions and low-level graphics
+ * primitives for custom rendering:
+ * 
+ * - Text rendering with automatic scrolling and line wrapping
+ * - Pixel-level graphics with 4-bit grayscale support
+ * - Drawing primitives (lines, rectangles, filled shapes)
+ * - Direct buffer access for custom rendering
+ * 
+ * ## Performance Considerations
+ * 
+ * The display runs on Core 1 to avoid interfering with real-time audio processing
+ * on Core 0. All display operations are optimized for speed and use efficient
+ * SPI communication to minimize CPU overhead.
+ * 
+ * @author Brian Varren
+ * @version 1.0
+ * @date 2024
+ */
+
 #pragma once
 #include <stdint.h>
 

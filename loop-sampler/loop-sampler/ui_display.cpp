@@ -33,7 +33,7 @@ static repeating_timer_t s_displayTimer;           // pico-sdk timer handle
 static bool              s_timerActive = false;    // track if timer is running
 
 // ────────────────────────── Forward declarations ─────────────────────────
-static void browser_render_sample_list(void);
+void browser_render_sample_list(void);
 
 // ─────────────────────── Display constants (no heap) ─────────────────────
 static const uint8_t SHADE_BACKGROUND  = 0;   // 0..15 (SH1122 grayscale)
@@ -41,132 +41,6 @@ static const uint8_t SHADE_WAVEFORM    = 12;
 static const uint8_t SHADE_DIM         = 4;   // reserved for future loop zone
 static const uint8_t SHADE_CENTERLINE  = 0;
 static const uint8_t SHADE_WAVEFORM_DIM = 4;  // NEW: dim waveform outside loop
-
-// ───────────────────────── Waveform cache & overlay helpers ───────────────
-// The waveform is drawn once; shading is overlaid on top each tick.
-static uint8_t s_wave_ymin[256];
-static uint8_t s_wave_ymax[256];
-static bool    s_wave_ready   = false;
-static int     s_lastStartPx  = -1;
-static int     s_lastEndPx    = -1;
-static int     s_lastPlayheadPx = -1; // Track previous cursor position
-
-static inline int adc12ToPx256(uint16_t v) {
-  // 12-bit ADC → 0..255 screen coordinate
-  return (v * 256) >> 12;
-}
-
-static inline void drawWaveColumn(int x, uint8_t y_min, uint8_t y_max, uint8_t shade) {
-  if (y_min > y_max) { uint8_t t = y_min; y_min = y_max; y_max = t; }
-  if (y_min == y_max) {
-    gray4_set_pixel(x, y_min, shade);
-  } else {
-    gray4_draw_vline(x, y_min, y_max, shade);
-  }
-}
-
-static inline void clearColumnToBackground(int x) {
-  gray4_draw_vline(x, 0, 64 - 1, SHADE_BACKGROUND);
-}
-
-static inline void restoreWaveColumn(int x, uint8_t shade) {
-  clearColumnToBackground(x);
-  drawWaveColumn(x, s_wave_ymin[x], s_wave_ymax[x], shade);
-}
-
-static inline void restoreWaveSpan(int x0, int x1, uint8_t shade) {
-  if (x0 > x1) return;
-  for (int x = x0; x <= x1; ++x) restoreWaveColumn(x, shade);
-}
-
-static inline void drawPlayheadCursor(int x) {
-  if (x >= 0 && x < 256) {
-    // Draw a bright vertical line for the playhead
-    gray4_draw_vline(x, 0, 64 - 1, 15);  // max brightness (15)
-  }
-}
-
-static inline void drawBoundaryLines(int start_px, int end_px) {
-  if (start_px >= 0 && start_px < 256) gray4_draw_vline(start_px, 0, 64 - 1, 8);
-  if (end_px   >= 0 && end_px   < 256) gray4_draw_vline(end_px,   0, 64 - 1, 8);
-}
-
-static void overlayLoopShadingTick() {
-  if (!s_wave_ready) return;
-
-  // Read the latest loop params
-  uint16_t loop_start_adc  = adc_filter_get(ADC_LOOP_START_CH);
-  uint16_t loop_length_adc = adc_filter_get(ADC_LOOP_LEN_CH);
-
-  int start_px  = adc12ToPx256(loop_start_adc);   // 0..255
-  int length_px = adc12ToPx256(loop_length_adc);  // 0..255
-  int end_px    = start_px + length_px;
-  if (end_px >= 256) end_px -= 256; // wrap to 0..255
-
-  // Calculate playhead position from phase (display-rate math, not audio-rate!)
-  int playhead_px = -1;
-  if (s_sampleCount > 0) {
-    uint64_t phase_snapshot = g_phase_q32_32;  // atomic read
-    uint64_t idx = phase_snapshot >> 32;       // get integer part
-    // Normalize to 0..255 pixels
-    playhead_px = (int)((idx * 256u) / s_sampleCount);
-    if (playhead_px > 255) playhead_px = 255;  // safety clamp
-  }
-
-  // Clear previous playhead cursor (restore the waveform at that column)
-  if (s_lastPlayheadPx >= 0 && s_lastPlayheadPx < 256) {
-    // Determine what shade this column should have based on loop region
-    uint8_t shade = SHADE_WAVEFORM_DIM;  // default to dim (outside loop)
-    
-    // Check if this column is inside the loop
-    if (end_px >= start_px) {
-      if (s_lastPlayheadPx >= start_px && s_lastPlayheadPx <= end_px) {
-        shade = SHADE_WAVEFORM;
-      }
-    } else {
-      // wrapped loop
-      if (s_lastPlayheadPx >= start_px || s_lastPlayheadPx <= end_px) {
-        shade = SHADE_WAVEFORM;
-      }
-    }
-    
-    restoreWaveColumn(s_lastPlayheadPx, shade);
-  }
-
-  // 1) Paint INSIDE the loop region at full shade (always)
-  if (end_px >= start_px) {
-    // contiguous
-    restoreWaveSpan(start_px, end_px, SHADE_WAVEFORM);
-  } else {
-    // wrap: [start..255] U [0..end]
-    restoreWaveSpan(start_px, 255, SHADE_WAVEFORM);
-    restoreWaveSpan(0, end_px,   SHADE_WAVEFORM);
-  }
-
-  // 2) Paint OUTSIDE the loop region at dim shade (always)
-  if (end_px >= start_px) {
-    if (start_px > 0)   restoreWaveSpan(0, start_px - 1, SHADE_WAVEFORM_DIM);
-    if (end_px < 255)   restoreWaveSpan(end_px + 1, 255, SHADE_WAVEFORM_DIM);
-  } else {
-    // wrap outside: (end+1 .. start-1) if there is space
-    if (end_px + 1 <= start_px - 1)
-      restoreWaveSpan(end_px + 1, start_px - 1, SHADE_WAVEFORM_DIM);
-  }
-
-  // 3) Boundary markers
-  drawBoundaryLines(start_px, end_px);
-
-  // 4) Draw playhead cursor (on top of everything)
-  if (playhead_px >= 0) {
-    drawPlayheadCursor(playhead_px);
-  }
-  s_lastPlayheadPx = playhead_px;
-
-  // 5) Flush
-  s_lastStartPx = start_px;
-  s_lastEndPx   = end_px;
-  gray4_send_buffer();
-}
 
 // ───────────────────────────── Timer ISR ─────────────────────────────────
 // Global ISR entry point (extern "C" so it's callable from anywhere)
@@ -196,108 +70,12 @@ static void render_status_line(const char* msg) {
 
 // ───────────────────────────── FSM accessors ─────────────────────────────
 DisplayState display_state(void) { return s_state; }
+void display_set_state(DisplayState st) { s_state = st; }
 
-// ───────────────────────────── Waveform view ─────────────────────────────
-void waveform_init(const int16_t* samples, uint32_t count, uint32_t sampleRate) {
-  s_samples     = samples;
-  s_sampleCount = count;
-  s_sampleRate  = sampleRate;
-}
-
-
-void waveform_draw(void) {
-  gray4_clear(SHADE_BACKGROUND);
-
-  const int W = 256;
-  const int H = 64;
-  const int mid = H / 2;
-
-  if (!s_samples || s_sampleCount == 0) {
-    gray4_draw_hline(0, W - 1, mid, SHADE_WAVEFORM);
-    s_wave_ready = false;
-    gray4_send_buffer();
-    return;
-  }
-
-  // Peak estimate for normalization
-  int16_t peak = 1;
-  {
-    const uint32_t step = (s_sampleCount > 4096u) ? (s_sampleCount / 4096u) : 1u;
-    int16_t maxabs = 1;
-    for (uint32_t i = 0; i < s_sampleCount; i += step) {
-      int16_t v = s_samples[i];
-      int16_t a = (v < 0) ? (int16_t)-v : v;
-      if (a > maxabs) maxabs = a;
-    }
-    peak = (maxabs < 128) ? 128 : maxabs;
-  }
-
-  // samples-per-pixel
-  const double spp = (double)s_sampleCount / (double)W;
-
-  // Build envelope cache and draw the waveform at full shade
-  for (int x = 0; x < W; ++x) {
-    uint32_t start = (uint32_t)floor((double)x * spp);
-    uint32_t end   = (uint32_t)floor((double)(x + 1) * spp);
-    if (start >= s_sampleCount) break;
-    if (end <= start) end = start + 1;
-    if (end > s_sampleCount) end = s_sampleCount;
-
-    int16_t cmin =  32767, cmax = -32768;
-    for (uint32_t i = start; i < end; ++i) {
-      int16_t v = s_samples[i];
-      if (v < cmin) cmin = v;
-      if (v > cmax) cmax = v;
-    }
-
-    int yMin = mid - ((int32_t)cmax * (H / 2)) / peak;
-    int yMax = mid - ((int32_t)cmin * (H / 2)) / peak;
-
-    if (yMin < 0)      yMin = 0;
-    if (yMin > H - 1)  yMin = H - 1;
-    if (yMax < 0)      yMax = 0;
-    if (yMax > H - 1)  yMax = H - 1;
-
-    s_wave_ymin[x] = (uint8_t)yMin;
-    s_wave_ymax[x] = (uint8_t)yMax;
-
-    drawWaveColumn(x, s_wave_ymin[x], s_wave_ymax[x], SHADE_WAVEFORM);
-  }
-
-  // reset loop overlay history so the first overlay tick repaints cleanly
-  s_lastStartPx = -1;
-  s_lastEndPx   = -1;
-  s_wave_ready  = true;
-
-  gray4_send_buffer();
-}
-
-
-
-bool waveform_on_turn(int8_t /*inc*/) {
-  // Any input exits to browser in current UX
-  waveform_exit();
-  return false;
-}
-
-bool waveform_on_button(void) {
-  waveform_exit();
-  return false;
-}
-
-bool waveform_is_active(void) {
-  return s_state == DS_WAVEFORM;
-}
-
-void waveform_exit(void) {
-  s_state = DS_BROWSER;
-  browser_render_sample_list();  // switch back to text view and redraw
-}
+// Waveform view functions moved to ui_waveform_view.cpp
 
 // ─────────────────────────── Browser rendering ───────────────────────────
-static void browser_render_sample_list() {
-
-
+void browser_render_sample_list() {
   Serial.print("browser_render_sample_list from core ");
   Serial.println(get_core_num());   // 0 or 1
 
@@ -460,7 +238,7 @@ void display_tick(void) {
     } break;
 
     case DS_WAVEFORM:
-      overlayLoopShadingTick();
+      waveform_overlay_tick();
       audio_engine_arm(true);
       audio_engine_play(true);
       break;
@@ -529,7 +307,7 @@ void display_on_button(void) {
       // Capture selection and transition to LOADING
       s_pendingIdx = s_sel;
       s_state = DS_LOADING;
-      
+
       // Force an immediate update to show loading status
       s_pendingUpdate = true;
     } break;
