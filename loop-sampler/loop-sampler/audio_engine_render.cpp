@@ -111,7 +111,10 @@ void ae_render_block(const int16_t* samples,
   // Early exit if not playing or no valid sample data
   if (engine_state != AE_STATE_PLAYING || !samples || total_samples < 2) {
     // Output silence and update display with current loop state
-    for (uint32_t i = 0; i < AUDIO_BLOCK_SIZE; ++i) out_buf_ptr[i] = 0;
+    for (uint32_t i = 0; i < AUDIO_BLOCK_SIZE; ++i) {
+      out_buf_ptr_L[i] = 0;
+      out_buf_ptr_R[i] = 0;
+    }
 
     const uint32_t total = total_samples ? total_samples : 1u;
     const uint16_t start_q12 = (uint16_t)(((uint64_t)s_active_start * 4095u) / (uint64_t)total);
@@ -278,8 +281,10 @@ void ae_render_block(const int16_t* samples,
       
       const int64_t mix_num = (int64_t)((float)a_q15 * fade_out)  // Old sample weight
                             + (int64_t)((float)b_q15 * fade_in);  // New sample weight
-      const int16_t mix_q15 = (int16_t)mix_num;
-      out_buf_ptr[n] = q15_to_pwm_u(mix_q15);
+      const int16_t crossfade_q15 = (int16_t)mix_num;
+      const uint16_t crossfade_pwm = q15_to_pwm_u(crossfade_q15);
+      out_buf_ptr_L[n] = crossfade_pwm;
+      out_buf_ptr_R[n] = crossfade_pwm;
       
       s_cf_tail_q += s_cf_inc_q;
       s_cf_head_q += s_cf_inc_q;
@@ -349,7 +354,9 @@ void ae_render_block(const int16_t* samples,
       const float fade_in0 = sinf(M_PI_2 * t0);             // New sample gain
       
       const int64_t num0 = (int64_t)((float)a0 * fade_out0) + (int64_t)((float)b0 * fade_in0);
-      out_buf_ptr[n] = q15_to_pwm_u((int16_t)num0);
+      const uint16_t crossfade_pwm = q15_to_pwm_u((int16_t)num0);
+      out_buf_ptr_L[n] = crossfade_pwm;
+      out_buf_ptr_R[n] = crossfade_pwm;
       
        s_cf_tail_q += s_cf_inc_q; s_cf_head_q += s_cf_inc_q;
       const uint64_t tail_end_q = ((uint64_t)s_cf_tail_end) << 32;
@@ -405,7 +412,9 @@ void ae_render_block(const int16_t* samples,
         const float fade_in0 = sinf(M_PI_2 * t0);             // New sample gain
         
         const int64_t num0 = (int64_t)((float)a0 * fade_out0) + (int64_t)((float)b0 * fade_in0);
-        out_buf_ptr[n] = q15_to_pwm_u((int16_t)num0);
+        const uint16_t crossfade_pwm = q15_to_pwm_u((int16_t)num0);
+        out_buf_ptr_L[n] = crossfade_pwm;
+        out_buf_ptr_R[n] = crossfade_pwm;
         
         s_cf_tail_q += s_cf_inc_q; s_cf_head_q += s_cf_inc_q;
         const uint64_t tail_end_q = ((uint64_t)s_cf_tail_end) << 32;
@@ -423,8 +432,10 @@ void ae_render_block(const int16_t* samples,
         }
     }
 
-    const int16_t s_q15 = sample_q15_from_phase(phase_q, s_active_start, s_active_end);
-    out_buf_ptr[n] = q15_to_pwm_u(s_q15);
+    const int16_t playback_q15 = sample_q15_from_phase(phase_q, s_active_start, s_active_end);
+    const uint16_t playback_pwm = q15_to_pwm_u(playback_q15);
+    out_buf_ptr_L[n] = playback_pwm;
+    out_buf_ptr_R[n] = playback_pwm;
     
     last_phase_q = phase_q;
   }

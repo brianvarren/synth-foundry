@@ -38,15 +38,20 @@
 
 // ── Audio Output Configuration ──────────────────────────────────────────────────
 #define AUDIO_BLOCK_SIZE    16    // Audio buffer size (samples per DMA transfer)
-#define PIN_PWM_OUT         20    // PWM output pin for audio
+#define PIN_PWM_OUT_L       20    // PWM output pin for audio
+#define PIN_PWM_OUT_R       21    // PWM output pin for audio
 #define PWM_RESOLUTION      4096  // PWM resolution (12-bit)
 
 // ── Audio Output State Variables ────────────────────────────────────────────────
 extern volatile uint16_t pwm_out_buf_a[AUDIO_BLOCK_SIZE];  // First audio buffer
 extern volatile uint16_t pwm_out_buf_b[AUDIO_BLOCK_SIZE];  // Second audio buffer
-extern volatile uint16_t* out_buf_ptr;                     // Pointer to active buffer
-extern volatile int callback_flag;                         // DMA completion flag
-extern int dma_chan_a, dma_chan_b;                        // DMA channel assignments
+extern volatile uint16_t pwm_out_buf_c[AUDIO_BLOCK_SIZE];  // Third audio buffer
+extern volatile uint16_t pwm_out_buf_d[AUDIO_BLOCK_SIZE];  // Fourth audio buffer
+extern volatile uint16_t* out_buf_ptr_L;                     // Pointer to active buffer
+extern volatile uint16_t* out_buf_ptr_R;                     // Pointer to active buffer
+extern volatile int callback_flag_L;                         // DMA completion flag
+extern volatile int callback_flag_R;                         // DMA completion flag
+extern int dma_chan_a, dma_chan_b, dma_chan_c, dma_chan_d;                        // DMA channel assignments
 extern float audio_rate;                                   // Audio sample rate (Hz)
 
 // ── Audio Output Interface Functions ────────────────────────────────────────────
@@ -74,7 +79,8 @@ void unmuteAudioOutput();
  * This function manages the ping-pong buffer system and signals
  * the audio engine to process the next buffer.
  */
-void PWM_DMATransCpltCallback();
+void PWM_DMATransCpltCallbackL();
+void PWM_DMATransCpltCallbackR();
 
 /**
  * @brief Configure PWM DMA for audio output
@@ -82,4 +88,5 @@ void PWM_DMATransCpltCallback();
  * Sets up the PWM and DMA system for continuous audio output.
  * Must be called during system initialization.
  */
-void configurePWM_DMA();
+void configurePWM_DMA_L();
+void configurePWM_DMA_R();

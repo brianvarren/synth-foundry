@@ -265,22 +265,25 @@ void playback_bind_loaded_buffer(uint32_t src_sample_rate_hz,
 
 void audio_init(void) {
     init_expo_table_1oct();
-    configurePWM_DMA();
+    configurePWM_DMA_L();
+    configurePWM_DMA_R();
     unmuteAudioOutput();
     
     setupInterpolators();
 
     // dma_start_channel_mask(1u << dma_chan);
-    Serial.printf("[AE] DMA started? %d\n", dma_channel_is_busy(dma_chan_a));
+    Serial.printf("[AE] DMA L started? %d\n", dma_channel_is_busy(dma_chan_a));
+    Serial.printf("[AE] DMA R started? %d\n", dma_channel_is_busy(dma_chan_c));
 
     Serial.println(F("[AE] Audio engine initialized"));
 }
 
 void audio_tick(void) {
-    if (callback_flag > 0) {
+    if (callback_flag_L > 0 && callback_flag_R > 0) {
         adc_filter_update_from_dma();
         ae_render_block(g_samples_q15, g_total_samples, s_state, &g_phase_q32_32);
-        callback_flag = 0;
+        callback_flag_L = 0;
+        callback_flag_R = 0;
     }
 }
 
