@@ -46,6 +46,7 @@
 #include "pico_interp.h"
 #include "sf_globals_bridge.h"
 #include "ui_input.h"
+#include "ladder_filter.h"
 #include <Arduino.h>
 
 // Forward declaration for reset trigger handling
@@ -88,6 +89,11 @@ static uint32_t s_cf_tail_end    = 0;  // Tail region end
 static uint32_t s_cf_head_start  = 0;  // Head region start
 static uint32_t s_cf_head_end    = 0;  // Head region end
 
+// ── 8-Pole Ladder Filters ──────────────────────────────────────────────────────
+// 8-pole ladder lowpass and highpass filters controlled by ADC5 and ADC6
+static Ladder8PoleLowpassFilter s_lowpass_filter;
+static Ladder8PoleHighpassFilter s_highpass_filter;
+
 
 
 /**
@@ -113,9 +119,11 @@ void ae_render_block(const int16_t* samples,
   // Early exit if not playing or no valid sample data
   if (engine_state != AE_STATE_PLAYING || !samples || total_samples < 2) {
     // Output silence and update display with current loop state
+    // Use PWM midpoint for silence to prevent pops (not 0!)
+    const uint16_t silence_pwm = PWM_RESOLUTION / 2;
     for (uint32_t i = 0; i < AUDIO_BLOCK_SIZE; ++i) {
-      out_buf_ptr_L[i] = 0;
-      out_buf_ptr_R[i] = 0;
+      out_buf_ptr_L[i] = silence_pwm;
+      out_buf_ptr_R[i] = silence_pwm;
     }
 
     const uint32_t total = total_samples ? total_samples : 1u;
@@ -128,6 +136,9 @@ void ae_render_block(const int16_t* samples,
   // ── Handle Reset Trigger ──────────────────────────────────────────────────────
   // Check for pending reset trigger and handle it if present
   if (g_reset_trigger_pending) {
+    // Trigger LED blink on reset trigger
+    audio_engine_loop_led_blink();
+    
     // Force ADC input re-read/update
     adc_filter_update_from_dma();
     
@@ -236,6 +247,8 @@ void ae_render_block(const int16_t* samples,
   const uint16_t adc_len_q12   = adc_filter_get(ADC_LOOP_LEN_CH);     // Loop length: 0..4095
   const uint16_t adc_xfade_q12 = adc_filter_get(ADC_XFADE_LEN_CH);    // Crossfade length: 0..4095
   const uint16_t adc_tune_q12  = adc_filter_get(ADC_TUNE_CH);         // Pitch fine tune: 0..4095
+  const uint16_t adc_lowpass_q12 = adc_filter_get(ADC_FX1_CH);        // Lowpass filter: 0..4095
+  const uint16_t adc_highpass_q12 = adc_filter_get(ADC_FX2_CH);       // Highpass filter: 0..4095
   
 
   // ── Use Fixed Minimum Loop Length ────────────────────────────────────────────
@@ -326,8 +339,8 @@ void ae_render_block(const int16_t* samples,
   // This lambda function converts a Q32.32 phase value to an interpolated Q15 sample
   // It handles bounds checking, sample lookup, and hardware-accelerated interpolation
   auto sample_q15_from_phase = [&](uint64_t phase, uint32_t start, uint32_t end_excl) -> int16_t {
-    // Early exit for invalid ranges
-    if (end_excl == 0 || start >= end_excl) return 0;
+    // Early exit for invalid ranges - return silence instead of 0 to prevent pops
+    if (end_excl == 0 || start >= end_excl) return 0;  // This is actually correct - 0 is Q15 silence
     
     // Convert end position to Q32.32 format and clamp phase
     const uint64_t end_q = ((uint64_t)end_excl) << 32;
@@ -384,9 +397,17 @@ void ae_render_block(const int16_t* samples,
       const float fade_out = sinf(M_PI_2 * (1.0f - t));  // Old sample gain
       const float fade_in = sinf(M_PI_2 * t);            // New sample gain
       
-      const int64_t mix_num = (int64_t)((float)a_q15 * fade_out)  // Old sample weight
+      int64_t mix_num = (int64_t)((float)a_q15 * fade_out)  // Old sample weight
                             + (int64_t)((float)b_q15 * fade_in);  // New sample weight
-      const int16_t crossfade_q15 = (int16_t)mix_num;
+      int16_t crossfade_q15 = (int16_t)mix_num;
+      
+      // Apply 8-pole ladder filters to crossfade sample
+      uint16_t lowpass_coeff = adc_to_ladder_coefficient(adc_lowpass_q12);
+      crossfade_q15 = s_lowpass_filter.process(crossfade_q15, lowpass_coeff);
+      
+      uint16_t highpass_coeff = adc_to_ladder_coefficient(adc_highpass_q12);
+      crossfade_q15 = s_highpass_filter.process(crossfade_q15, highpass_coeff);
+      
       const uint16_t crossfade_pwm = q15_to_pwm_u(crossfade_q15);
       out_buf_ptr_L[n] = crossfade_pwm;
       out_buf_ptr_R[n] = crossfade_pwm;
@@ -419,6 +440,9 @@ void ae_render_block(const int16_t* samples,
     // ── Crossfade Initiation ────────────────────────────────────────────────────────
     // We've reached the crossfade start point - begin transitioning to new loop region
     if (start_xfade) {
+      // Trigger LED blink on crossfade initiation (loop wrap with crossfade)
+      audio_engine_loop_led_blink();
+      
       // Store current and new loop region boundaries
       const uint32_t old_start = s_active_start;  // Current loop start
       const uint32_t old_end   = s_active_end;    // Current loop end
@@ -457,8 +481,17 @@ void ae_render_block(const int16_t* samples,
       const float fade_out0 = sinf(M_PI_2 * (1.0f - t0));  // Old sample gain
       const float fade_in0 = sinf(M_PI_2 * t0);             // New sample gain
       
-      const int64_t num0 = (int64_t)((float)a0 * fade_out0) + (int64_t)((float)b0 * fade_in0);
-      const uint16_t crossfade_pwm = q15_to_pwm_u((int16_t)num0);
+      int64_t num0 = (int64_t)((float)a0 * fade_out0) + (int64_t)((float)b0 * fade_in0);
+      int16_t crossfade_q15 = (int16_t)num0;
+      
+      // Apply 8-pole ladder filters to crossfade sample
+      uint16_t lowpass_coeff = adc_to_ladder_coefficient(adc_lowpass_q12);
+      crossfade_q15 = s_lowpass_filter.process(crossfade_q15, lowpass_coeff);
+      
+      uint16_t highpass_coeff = adc_to_ladder_coefficient(adc_highpass_q12);
+      crossfade_q15 = s_highpass_filter.process(crossfade_q15, highpass_coeff);
+      
+      const uint16_t crossfade_pwm = q15_to_pwm_u(crossfade_q15);
       out_buf_ptr_L[n] = crossfade_pwm;
       out_buf_ptr_R[n] = crossfade_pwm;
       
@@ -477,6 +510,9 @@ void ae_render_block(const int16_t* samples,
 
     uint32_t idx = (uint32_t)(phase_q >> 32);
     if (crossed_end || idx >= total_samples) {
+      // Trigger LED blink on loop wrap
+      audio_engine_loop_led_blink();
+      
       // Store current and new loop region boundaries
       const uint32_t old_start = s_active_start;  // Current loop start
       const uint32_t old_end   = s_active_end;    // Current loop end
@@ -514,8 +550,17 @@ void ae_render_block(const int16_t* samples,
         const float fade_out0 = sinf(M_PI_2 * (1.0f - t0));  // Old sample gain
         const float fade_in0 = sinf(M_PI_2 * t0);             // New sample gain
         
-        const int64_t num0 = (int64_t)((float)a0 * fade_out0) + (int64_t)((float)b0 * fade_in0);
-        const uint16_t crossfade_pwm = q15_to_pwm_u((int16_t)num0);
+        int64_t num0 = (int64_t)((float)a0 * fade_out0) + (int64_t)((float)b0 * fade_in0);
+        int16_t crossfade_q15 = (int16_t)num0;
+        
+        // Apply 8-pole ladder filters to crossfade sample
+        uint16_t lowpass_coeff = adc_to_ladder_coefficient(adc_lowpass_q12);
+        crossfade_q15 = s_lowpass_filter.process(crossfade_q15, lowpass_coeff);
+        
+        uint16_t highpass_coeff = adc_to_ladder_coefficient(adc_highpass_q12);
+        crossfade_q15 = s_highpass_filter.process(crossfade_q15, highpass_coeff);
+        
+        const uint16_t crossfade_pwm = q15_to_pwm_u(crossfade_q15);
         out_buf_ptr_L[n] = crossfade_pwm;
         out_buf_ptr_R[n] = crossfade_pwm;
         
@@ -535,7 +580,16 @@ void ae_render_block(const int16_t* samples,
         }
     }
 
-    const int16_t playback_q15 = sample_q15_from_phase(phase_q, s_active_start, s_active_end);
+    int16_t playback_q15 = sample_q15_from_phase(phase_q, s_active_start, s_active_end);
+    
+    // ── Apply 8-Pole Ladder Filters ──────────────────────────────────────────────
+    // Apply lowpass and highpass filters controlled by ADC5 and ADC6
+    uint16_t lowpass_coeff = adc_to_ladder_coefficient(adc_lowpass_q12);
+    playback_q15 = s_lowpass_filter.process(playback_q15, lowpass_coeff);
+    
+    uint16_t highpass_coeff = adc_to_ladder_coefficient(adc_highpass_q12);
+    playback_q15 = s_highpass_filter.process(playback_q15, highpass_coeff);
+    
     const uint16_t playback_pwm = q15_to_pwm_u(playback_q15);
     out_buf_ptr_L[n] = playback_pwm;
     out_buf_ptr_R[n] = playback_pwm;

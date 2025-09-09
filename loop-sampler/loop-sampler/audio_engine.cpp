@@ -118,6 +118,12 @@ int64_t g_pm_scale_q32_32 = 0;             // default = no phase modulation
 volatile bool g_reset_trigger_pending = false;
 static bool s_reset_trigger_last_state = false;
 
+// ── Loop LED state ────────────────────────────────────────────────────────────
+// LED control for visual feedback when loop wraps
+static bool s_loop_led_state = false;
+static uint32_t s_loop_led_off_time = 0;
+static const uint32_t LOOP_LED_BLINK_MS = 10;  // LED blink duration in milliseconds
+
 
 static const int16_t* g_samples_q15 = nullptr;
 
@@ -262,16 +268,25 @@ void playback_bind_loaded_buffer(uint32_t src_sample_rate_hz,
     // Ensure loop spans are valid for the new file
     loop_mapper_recalc_spans();
     
-    // Debug log
-    Serial.print(F("[AE] Buffer bound: "));
-    Serial.print(sample_count);
-    Serial.print(F(" samples @ "));
-    Serial.print(src_sample_rate_hz);
-    Serial.println(F(" Hz"));
+    // Debug log - DISABLED TO PREVENT POPS
+    // Serial.print(F("[AE] Buffer bound: "));
+    // Serial.print(sample_count);
+    // Serial.print(F(" samples @ "));
+    // Serial.print(src_sample_rate_hz);
+    // Serial.println(F(" Hz"));
 }
 
 
 void audio_init(void) {
+    // Initialize all audio buffers to silence to prevent startup pops
+    const uint16_t silence_pwm = PWM_RESOLUTION / 2;  // Midpoint = silence
+    for (int i = 0; i < AUDIO_BLOCK_SIZE; i++) {
+        pwm_out_buf_a[i] = silence_pwm;
+        pwm_out_buf_b[i] = silence_pwm;
+        pwm_out_buf_c[i] = silence_pwm;
+        pwm_out_buf_d[i] = silence_pwm;
+    }
+    
     init_expo_table_1oct();
     configurePWM_DMA_L();
     configurePWM_DMA_R();
@@ -280,14 +295,16 @@ void audio_init(void) {
     setupInterpolators();
 
     // dma_start_channel_mask(1u << dma_chan);
-    Serial.printf("[AE] DMA L started? %d\n", dma_channel_is_busy(dma_chan_a));
-    Serial.printf("[AE] DMA R started? %d\n", dma_channel_is_busy(dma_chan_c));
+    // Serial.printf("[AE] DMA L started? %d\n", dma_channel_is_busy(dma_chan_a));
+    // Serial.printf("[AE] DMA R started? %d\n", dma_channel_is_busy(dma_chan_c));
 
-    Serial.println(F("[AE] Audio engine initialized"));
+    // Serial.println(F("[AE] Audio engine initialized"));
 }
 
 void audio_tick(void) {
-    if (callback_flag_L > 0 && callback_flag_R > 0) {
+    // Process audio when either channel is ready to prevent buffer underruns
+    // This fixes the pop issue caused by waiting for both channels simultaneously
+    if (callback_flag_L > 0 || callback_flag_R > 0) {
         adc_filter_update_from_dma();
         ae_render_block(g_samples_q15, g_total_samples, s_state, &g_phase_q32_32);
         callback_flag_L = 0;
@@ -316,7 +333,7 @@ void audio_engine_reset_trigger_init(void) {
     s_reset_trigger_last_state = gpio_get(RESET_TRIGGER_PIN);
     g_reset_trigger_pending = false;
     
-    Serial.println(F("[AE] Reset trigger initialized on GPIO18 (rising edge)"));
+    // Serial.println(F("[AE] Reset trigger initialized on GPIO18 (rising edge)"));
 }
 
 /**
@@ -332,7 +349,7 @@ void audio_engine_reset_trigger_poll(void) {
     // Detect rising edge (active-high trigger)
     if (!s_reset_trigger_last_state && current_state) {
         g_reset_trigger_pending = true;
-        Serial.println(F("[AE] Reset trigger detected (rising edge)"));
+        // Serial.println(F("[AE] Reset trigger detected (rising edge)"));
     }
     
     s_reset_trigger_last_state = current_state;
@@ -358,11 +375,11 @@ void audio_engine_reset_trigger_handle(void) {
     
     // Only process if we have a valid sample loaded and are playing
     if (!g_samples_q15 || g_total_samples == 0 || s_state != AE_STATE_PLAYING) {
-        Serial.println(F("[AE] Reset trigger ignored - no sample or not playing"));
+        // Serial.println(F("[AE] Reset trigger ignored - no sample or not playing"));
         return;
     }
     
-    Serial.println(F("[AE] Processing reset trigger"));
+    // Serial.println(F("[AE] Processing reset trigger"));
     
     // Force ADC input re-read/update by calling the filter update
     adc_filter_update_from_dma();
@@ -404,13 +421,59 @@ void audio_engine_reset_trigger_handle(void) {
     // If crossfade is specified, we need to set up crossfade state
     // This will be handled in the audio render loop when it detects the crossfade
     if (xfade_len > 0) {
-        Serial.printf("[AE] Reset trigger: crossfade length = %u samples\n", xfade_len);
+        // Serial.printf("[AE] Reset trigger: crossfade length = %u samples\n", xfade_len);
         // The crossfade will be initiated in the next audio block
         // by the existing crossfade logic in ae_render_block()
     } else {
-        Serial.println(F("[AE] Reset trigger: immediate reset (no crossfade)"));
+        // Serial.println(F("[AE] Reset trigger: immediate reset (no crossfade)"));
     }
     
-    Serial.printf("[AE] Reset trigger: new loop region [%u, %u), length %u\n", 
-                  new_start, new_end, new_end - new_start);
+    // Serial.printf("[AE] Reset trigger: new loop region [%u, %u), length %u\n", 
+    //               new_start, new_end, new_end - new_start);
+}
+
+// ── Loop LED Functions ─────────────────────────────────────────────────────────
+
+/**
+ * @brief Initialize GPIO15 for loop LED
+ * 
+ * Sets up GPIO15 as an output for the external loop LED that blinks
+ * when the loop wraps to provide visual feedback.
+ */
+void audio_engine_loop_led_init(void) {
+    gpio_init(LOOP_LED_PIN);
+    gpio_set_dir(LOOP_LED_PIN, GPIO_OUT);
+    gpio_put(LOOP_LED_PIN, 0);  // Start with LED off
+    
+    // Initialize LED state
+    s_loop_led_state = false;
+    s_loop_led_off_time = 0;
+    
+    // Serial.println(F("[AE] Loop LED initialized on GPIO15"));
+}
+
+/**
+ * @brief Update LED state and handle blinking
+ * 
+ * This function should be called from the main loop to manage the LED
+ * blinking state. It turns the LED off after the blink duration expires.
+ */
+void audio_engine_loop_led_update(void) {
+    // Check if LED is currently on and time to turn it off
+    if (s_loop_led_state && millis() >= s_loop_led_off_time) {
+        gpio_put(LOOP_LED_PIN, 0);  // Turn LED off
+        s_loop_led_state = false;
+    }
+}
+
+/**
+ * @brief Trigger LED blink on loop wrap
+ * 
+ * This function should be called when the loop wraps to provide
+ * visual feedback. It turns the LED on for a brief duration.
+ */
+void audio_engine_loop_led_blink(void) {
+    gpio_put(LOOP_LED_PIN, 1);  // Turn LED on
+    s_loop_led_state = true;
+    s_loop_led_off_time = millis() + LOOP_LED_BLINK_MS;
 }

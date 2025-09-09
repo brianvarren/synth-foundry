@@ -17,10 +17,10 @@ void configureADC_DMA(){
     uint8_t mask = (1u << NUM_ADC_INPUTS) - 1;
 
     #ifdef ADCLESS_RP2350B
-        Serial.println("RP2350B is defined.");
-        Serial.println(mask, HEX);
+        // Serial.println("RP2350B is defined."); // DISABLED TO PREVENT POPS
+        // Serial.println(mask, HEX);
     #else
-        Serial.println("RP2350B is not defined.");
+        // Serial.println("RP2350B is not defined."); // DISABLED TO PREVENT POPS
     #endif
 
     // Setup ADC.

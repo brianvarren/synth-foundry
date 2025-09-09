@@ -23,7 +23,7 @@ static void log_err(const char* tag) {
 
   // ───────────────── Initialization ─────────────────
   bool sd_begin() {
-    Serial.println("Initializing SD card on SPI1...");
+    // Serial.println("Initializing SD card on SPI1..."); // DISABLED TO PREVENT POPS
     
     // Configure SPI1 pins
     SPI1.setSCK(SD_SCK_PIN);
@@ -36,13 +36,13 @@ static void log_err(const char* tag) {
     //sd = new SdFat();
     
     // if (!sd || !cfg) {
-    //   Serial.println("Failed to allocate SD objects");
+    //   // Serial.println("Failed to allocate SD objects"); // DISABLED TO PREVENT POPS
     //   return false;
     // }
     
     // Initialize SD card
     if (!sd.begin(cfg)) {
-      Serial.println("SD card initialization failed");
+      // Serial.println("SD card initialization failed"); // DISABLED TO PREVENT POPS
       return false;
     }
     
@@ -50,7 +50,7 @@ static void log_err(const char* tag) {
     cardSizeMB = sd.card()->sectorCount() / 2048.0;
     initialized = true;
     
-    Serial.printf("SD card initialized. Size: %.1f MB\n", cardSizeMB);
+    // Serial.printf("SD card initialized. Size: %.1f MB\n", cardSizeMB); // DISABLED TO PREVENT POPS
     return true;
   }
 

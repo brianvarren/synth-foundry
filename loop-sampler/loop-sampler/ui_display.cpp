@@ -76,8 +76,8 @@ void display_set_state(DisplayState st) { s_state = st; }
 
 // ─────────────────────────── Browser rendering ───────────────────────────
 void browser_render_sample_list() {
-  Serial.print("browser_render_sample_list from core ");
-  Serial.println(get_core_num());   // 0 or 1
+  // Serial.print("browser_render_sample_list from core "); // DISABLED TO PREVENT POPS
+  // Serial.println(get_core_num());   // 0 or 1
 
   view_set_auto_scroll(false); // stop auto-scrolling while browsing
 
@@ -128,7 +128,7 @@ void display_init(void) {
 
   // Start display timer at 30 FPS (you can adjust this)
   if (!display_timer_begin(30)) {
-    Serial.println("Warning: Failed to start display timer");
+    // Serial.println("Warning: Failed to start display timer"); // DISABLED TO PREVENT POPS
     // Not fatal - display_tick() can still be called manually from loop()
   }
 }

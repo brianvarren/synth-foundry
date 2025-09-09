@@ -20,3 +20,6 @@
 
 // ─────────────────────── Reset Trigger ───────────────────────
 #define RESET_TRIGGER_PIN 18  // GPIO18 for tempo sync reset trigger
+
+// ─────────────────────── Loop LED ───────────────────────
+#define LOOP_LED_PIN 15  // GPIO15 for external LED (blinks on loop wrap)
