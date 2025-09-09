@@ -257,19 +257,12 @@ private:
  * @return Filter coefficient (0-32767)
  */
 inline uint16_t adc_to_ladder_coefficient(uint16_t adc_value) {
-    // Map 0-4095 to 0-32767 with logarithmic response
-    // This gives more musical control over the filter frequency
+    // Map 0-4095 to 0-32767 with smooth response
+    // This gives musical control over the filter frequency without sudden jumps
     
-    // For lowpass: 0 should give minimum coefficient (not bypass)
-    // For highpass: 0 should give minimum coefficient (not bypass)
-    // Use a power curve: coefficient = (adc/4095)^0.7 * 32767
-    // This provides more resolution in the lower frequencies
-    uint32_t normalized = ((uint32_t)adc_value * 32767) / 4095;
-    
-    // Use a gentler power curve (0.7 instead of 1.5) for better range
-    // This gives more usable range across the entire knob travel
-    uint32_t powered = (normalized * normalized) / 32767;
-    uint32_t result = (powered * 32767) / normalized;  // Simplified power curve
+    // Simple linear mapping for now to prevent pops
+    // TODO: Implement proper logarithmic curve later if needed
+    uint32_t result = ((uint32_t)adc_value * 32767) / 4095;
     
     // Ensure minimum coefficient for proper filtering even at lowest setting
     if (result < 512) result = 512;  // Minimum coefficient for gentle filtering

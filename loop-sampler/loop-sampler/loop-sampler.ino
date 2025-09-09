@@ -149,13 +149,14 @@ bool initPSRAM() {
  * fails to initialize, the system halts with an error message.
  */
 void setup() {
-  // Initialize serial communication for debugging
+  // Initialize serial communication for debugging - minimal to prevent pops
   Serial.begin(115200);
-  while(!Serial);  // Wait for serial connection (important for debugging)
+  // while(!Serial);  // DISABLED - don't wait for serial connection to prevent boot hang
   delay(1000);
-  Serial.println("\n=== Olimex Pico2-XXL Loop Sampler ===\n");
+  Serial.println("Boot: Starting..."); // Minimal debug for boot diagnosis
 
   // Initialize display system and show startup status
+  Serial.println("Boot: Initializing display...");
   view_show_status("Loop Sampler", "Initializing");
   view_clear_log();
   view_print_line("=== Loop Sampler ===");
@@ -165,19 +166,25 @@ void setup() {
   delay(500);
 
   // Initialize PSRAM - CRITICAL for sample storage
+  Serial.println("Boot: Checking PSRAM...");
   if (!initPSRAM()) {
+    Serial.println("Boot: PSRAM FAILED!");
     view_flush_if_dirty();
     while (1) delay(100);  // Halt if PSRAM fails - system cannot function without it
   }
+  Serial.println("Boot: PSRAM OK");
   view_flush_if_dirty();
   delay(500);
   
   // Initialize SD card for sample file access
+  Serial.println("Boot: Initializing SD card...");
   if (!sd_begin()) {
+    Serial.println("Boot: SD Card FAILED!");
     view_print_line("❌ SD Card failed!");
     view_flush_if_dirty();
     while (1) delay(100);  // Halt if SD card fails - no samples to load
   }
+  Serial.println("Boot: SD Card OK");
   {
     float mb = sd_card_size_mb();
     view_print_line("✅ SD Card ready");
@@ -187,20 +194,26 @@ void setup() {
   delay(500);
   
   // Initialize input system (encoders, rotary switch, ADC filtering)
+  Serial.println("Boot: Initializing inputs...");
   ui_input_init();
   
   // Initialize audio engine (PWM output, DMA, interpolation tables)
+  Serial.println("Boot: Initializing audio engine...");
   audio_init();
   
   // Initialize reset trigger on GPIO18
+  Serial.println("Boot: Initializing reset trigger...");
   audio_engine_reset_trigger_init();
   
   // Initialize loop LED on GPIO15
+  Serial.println("Boot: Initializing loop LED...");
   audio_engine_loop_led_init();
 
   // Signal to Core 1 that setup is complete - this triggers file scanning
   // and browser initialization on the display core
+  Serial.println("Boot: Signaling Core 1...");
   core0_publish_setup_done();
+  Serial.println("Boot: Core 0 setup complete!");
 }
 
 // ───────────────────────── Core 1 Setup (Display Core) ────────────────────────
@@ -212,7 +225,9 @@ void setup() {
  * from the real-time audio processing on Core 0.
  */
 void setup1(){
+  Serial.println("Core1: Starting display init...");
   display_init();
+  Serial.println("Core1: Display init complete");
 }
 
 // ───────────────────────── Core 0 Main Loop (Audio Core) ──────────────────────
@@ -271,16 +286,25 @@ void loop() {
  */
 void loop1() {
   static bool s_boot_done = false;
+  static uint32_t last_debug = 0;
 
   // Phase 1: Wait for Core 0 to complete setup, then initialize browser
   if (!s_boot_done) {
     if (g_core0_setup_done) {
+      Serial.println("Core1: Core 0 setup complete, initializing browser...");
       // Core 0 is ready - scan SD card and enter file browser
       display_setup_complete();              // calls file_index_scan + first render
       s_boot_done = true;                    // guard: call only once
+      Serial.println("Core1: Browser initialization complete");
     } else {
       // Keep Core 1 gentle while waiting for Core 0
       delayMicroseconds(200);
+      
+      // Debug output every 5 seconds
+      if (millis() - last_debug > 5000) {
+        Serial.println("Core1: Waiting for Core 0...");
+        last_debug = millis();
+      }
     }
     return;
   }

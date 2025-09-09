@@ -67,7 +67,7 @@ static EEncoder s_enc(ENC_A_PIN, ENC_B_PIN, ENC_BTN_PIN, ENC_COUNTS_PER_DETENT);
 
 
 void ui_octave_change_callback(RotarySwitch& oct) {
-  Serial.print("Octave changed to: "); Serial.println(oct.getPosition());
+  // Serial.print("Octave changed to: "); Serial.println(oct.getPosition()); // DISABLED TO PREVENT POPS
 }
 
 // Function to get current octave switch position for audio engine

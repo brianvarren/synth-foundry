@@ -119,9 +119,11 @@ void ae_render_block(const int16_t* samples,
   // Early exit if not playing or no valid sample data
   if (engine_state != AE_STATE_PLAYING || !samples || total_samples < 2) {
     // Output silence and update display with current loop state
+    // Use PWM midpoint for silence to prevent pops (not 0!)
+    const uint16_t silence_pwm = PWM_RESOLUTION / 2;
     for (uint32_t i = 0; i < AUDIO_BLOCK_SIZE; ++i) {
-      out_buf_ptr_L[i] = 0;
-      out_buf_ptr_R[i] = 0;
+      out_buf_ptr_L[i] = silence_pwm;
+      out_buf_ptr_R[i] = silence_pwm;
     }
 
     const uint32_t total = total_samples ? total_samples : 1u;
@@ -337,8 +339,8 @@ void ae_render_block(const int16_t* samples,
   // This lambda function converts a Q32.32 phase value to an interpolated Q15 sample
   // It handles bounds checking, sample lookup, and hardware-accelerated interpolation
   auto sample_q15_from_phase = [&](uint64_t phase, uint32_t start, uint32_t end_excl) -> int16_t {
-    // Early exit for invalid ranges
-    if (end_excl == 0 || start >= end_excl) return 0;
+    // Early exit for invalid ranges - return silence instead of 0 to prevent pops
+    if (end_excl == 0 || start >= end_excl) return 0;  // This is actually correct - 0 is Q15 silence
     
     // Convert end position to Q32.32 format and clamp phase
     const uint64_t end_q = ((uint64_t)end_excl) << 32;

@@ -107,15 +107,15 @@ void view_flush_if_dirty() {
   auto& g = sh1122_gfx();
   view_redraw_log(g);
 
-  Serial.print("view_flush_if_dirty from core ");
-  Serial.println(get_core_num());   // 0 or 1
+  // Serial.print("view_flush_if_dirty from core "); // DISABLED TO PREVENT POPS
+  // Serial.println(get_core_num());   // 0 or 1
 
 }
 
 void view_show_status(const char* title, const char* line2) {
 
-  Serial.print("view_show_status from core ");
-  Serial.println(get_core_num());   // 0 or 1
+  // Serial.print("view_show_status from core "); // DISABLED TO PREVENT POPS
+  // Serial.println(get_core_num());   // 0 or 1
 
   auto& g = sh1122_gfx();
   g.clearBuffer();
@@ -128,8 +128,8 @@ void view_show_status(const char* title, const char* line2) {
 
 void sh1122_init() {
 
-  Serial.print("sh1122_init from core ");
-  Serial.println(get_core_num());   // 0 or 1
+  // Serial.print("sh1122_init from core "); // DISABLED TO PREVENT POPS
+  // Serial.println(get_core_num());   // 0 or 1
   
   // Hardware reset (safe on SH1122 boards)
   pinMode(DISP_RST, OUTPUT);
