@@ -118,6 +118,12 @@ int64_t g_pm_scale_q32_32 = 0;             // default = no phase modulation
 volatile bool g_reset_trigger_pending = false;
 static bool s_reset_trigger_last_state = false;
 
+// ── Loop LED state ────────────────────────────────────────────────────────────
+// LED control for visual feedback when loop wraps
+static bool s_loop_led_state = false;
+static uint32_t s_loop_led_off_time = 0;
+static const uint32_t LOOP_LED_BLINK_MS = 10;  // LED blink duration in milliseconds
+
 
 static const int16_t* g_samples_q15 = nullptr;
 
@@ -413,4 +419,50 @@ void audio_engine_reset_trigger_handle(void) {
     
     Serial.printf("[AE] Reset trigger: new loop region [%u, %u), length %u\n", 
                   new_start, new_end, new_end - new_start);
+}
+
+// ── Loop LED Functions ─────────────────────────────────────────────────────────
+
+/**
+ * @brief Initialize GPIO15 for loop LED
+ * 
+ * Sets up GPIO15 as an output for the external loop LED that blinks
+ * when the loop wraps to provide visual feedback.
+ */
+void audio_engine_loop_led_init(void) {
+    gpio_init(LOOP_LED_PIN);
+    gpio_set_dir(LOOP_LED_PIN, GPIO_OUT);
+    gpio_put(LOOP_LED_PIN, 0);  // Start with LED off
+    
+    // Initialize LED state
+    s_loop_led_state = false;
+    s_loop_led_off_time = 0;
+    
+    Serial.println(F("[AE] Loop LED initialized on GPIO15"));
+}
+
+/**
+ * @brief Update LED state and handle blinking
+ * 
+ * This function should be called from the main loop to manage the LED
+ * blinking state. It turns the LED off after the blink duration expires.
+ */
+void audio_engine_loop_led_update(void) {
+    // Check if LED is currently on and time to turn it off
+    if (s_loop_led_state && millis() >= s_loop_led_off_time) {
+        gpio_put(LOOP_LED_PIN, 0);  // Turn LED off
+        s_loop_led_state = false;
+    }
+}
+
+/**
+ * @brief Trigger LED blink on loop wrap
+ * 
+ * This function should be called when the loop wraps to provide
+ * visual feedback. It turns the LED on for a brief duration.
+ */
+void audio_engine_loop_led_blink(void) {
+    gpio_put(LOOP_LED_PIN, 1);  // Turn LED on
+    s_loop_led_state = true;
+    s_loop_led_off_time = millis() + LOOP_LED_BLINK_MS;
 }

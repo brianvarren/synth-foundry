@@ -39,6 +39,7 @@
  * - 8-position rotary switch for octave selection
  * - 7 analog control inputs (pots/knobs)
  * - Reset trigger input (GPIO18) for tempo sync
+ * - Loop LED output (GPIO15) for visual feedback
  * 
  * ## Audio Engine Details
  * 
@@ -58,6 +59,14 @@
  * - Initiates seamless crossfade from current playhead to loop start
  * - Enables smooth tempo-synchronized loop resets without audio glitches
  * - Crossfade quality is independent of loop length or timing
+ * 
+ * ## Loop LED System
+ * 
+ * The loop LED on GPIO15 provides visual feedback:
+ * - Blinks for 50ms when the loop wraps (reaches loop end)
+ * - Blinks for 50ms when reset trigger is received (tempo sync)
+ * - Provides visual tempo sync feedback for live performance
+ * - Works with both crossfaded and immediate loop transitions
  * 
  * @author Brian Varren
  * @version 1.0
@@ -185,6 +194,9 @@ void setup() {
   
   // Initialize reset trigger on GPIO18
   audio_engine_reset_trigger_init();
+  
+  // Initialize loop LED on GPIO15
+  audio_engine_loop_led_init();
 
   // Signal to Core 1 that setup is complete - this triggers file scanning
   // and browser initialization on the display core
@@ -223,6 +235,9 @@ void loop() {
   
   // Poll for reset trigger on GPIO18
   audio_engine_reset_trigger_poll();
+  
+  // Update loop LED state
+  audio_engine_loop_led_update();
   
   // Debug output (currently disabled to maintain real-time performance)
   static uint32_t last = 0;
