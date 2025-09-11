@@ -20,11 +20,11 @@
  * - Channel 0: Loop start position
  * - Channel 1: Loop length
  * - Channel 2: Pitch fine tune
- * - Channel 3: Phase modulation (future use)
+ * - Channel 3: Linear FM modulator input (external signal)
  * - Channel 4: Crossfade length
- * - Channel 5: Effect 1 (future use)
- * - Channel 6: Effect 2 (future use)
- * - Channel 7: Reserved
+ * - Channel 5: Bandpass filter cutoff
+ * - Channel 6: Bandpass filter bandwidth
+ * - Channel 7: Linear FM depth control
  * 
  * ## Hardware Compatibility
  * 

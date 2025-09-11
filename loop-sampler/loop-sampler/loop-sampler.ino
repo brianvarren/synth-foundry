@@ -29,6 +29,7 @@
  * - **Reset Trigger**: GPIO18 input for tempo sync and loop reset with crossfading
  * - **PSRAM Storage**: Large sample buffers (up to 8MB) for long recordings
  * - **Q15 Audio Processing**: Fixed-point DSP for consistent performance
+ * - **Linear FM**: Real-time frequency modulation with external modulator input
  * 
  * ## Hardware Requirements
  * 
@@ -37,7 +38,7 @@
  * - SD card for sample storage
  * - Rotary encoder with button
  * - 8-position rotary switch for octave selection
- * - 7 analog control inputs (pots/knobs)
+ * - 8 analog control inputs (pots/knobs + FM modulator input)
  * - Reset trigger input (GPIO18) for tempo sync
  * - Loop LED output (GPIO15) for visual feedback
  * 
