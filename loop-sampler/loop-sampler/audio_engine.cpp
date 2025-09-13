@@ -215,38 +215,6 @@ static inline void loop_mapper_recalc_spans() {
  * @param out_start Output: loop start sample index
  * @param out_end Output: loop end sample index (exclusive)
  */
-static inline void derive_loop_indices(uint16_t adc_start,
-                                       uint16_t adc_len,
-                                       uint32_t total,
-                                       uint32_t* __restrict out_start,
-                                       uint32_t* __restrict out_end)
-{
-    // Map ADC values to sample indices using precomputed spans
-    // This avoids expensive division operations in the audio interrupt
-    
-    // Loop start: map 0-4095 to [0, total - min_len]
-    uint32_t start = (uint32_t(adc_start) * g_span_start) >> 12;   // 12-bit shift for efficiency
-    
-    // Loop length: map 0-4095 to [min_len, total]
-    uint32_t len   = MIN_LOOP_LEN_CONST + ((uint32_t(adc_len) * g_span_len) >> 12);
-
-    // Apply safety clamps to prevent invalid loop regions
-    // These should rarely be needed if spans are calculated correctly
-    if (start > total - MIN_LOOP_LEN_CONST) start = total - MIN_LOOP_LEN_CONST;  // Prevent start too close to end
-    if (len   < MIN_LOOP_LEN_CONST)         len   = MIN_LOOP_LEN_CONST;          // Enforce minimum length
-    if (start + len > total)            len   = total - start;           // Prevent overflow
-
-    // Return loop boundaries (end is exclusive)
-    *out_start = start;
-    *out_end   = start + len;  // [start, end) - end is exclusive
-}
-
-
-static inline int16_t adc12_to_q15_centered(uint16_t raw12) {
-    // 0..4095 -> -32768..+32752 (approx). One shift is enough and cheap.
-    int32_t centered = (int32_t)raw12 - 2048;    // -2048..+2047
-    return (int16_t)(centered << 4);             // scale to ~Q15
-}
 
 static inline uint16_t q15_to_pwm_u(int16_t s) {
     // Map [-32768..32767] to [0..PWM_RESOLUTION-1]
@@ -267,6 +235,9 @@ void playback_bind_loaded_buffer(uint32_t src_sample_rate_hz,
 
     // Ensure loop spans are valid for the new file
     loop_mapper_recalc_spans();
+    
+    // Reset loop boundaries calculation flag for new file
+    ae_reset_loop_boundaries_flag();
     
     // Debug log - DISABLED TO PREVENT POPS
     // Serial.print(F("[AE] Buffer bound: "));
@@ -310,10 +281,6 @@ void audio_tick(void) {
         callback_flag_L = 0;
         callback_flag_R = 0;
     }
-}
-
-void process() {
-    // Delegated via audio_tick -> ae_render_block()
 }
 
 // ── Reset Trigger Functions ──────────────────────────────────────────────────────
@@ -367,70 +334,7 @@ void audio_engine_reset_trigger_poll(void) {
  * This function should be called from the audio processing loop when
  * g_reset_trigger_pending is true.
  */
-void audio_engine_reset_trigger_handle(void) {
-    if (!g_reset_trigger_pending) return;
-    
-    // Clear the pending flag first to prevent re-triggering
-    g_reset_trigger_pending = false;
-    
-    // Only process if we have a valid sample loaded and are playing
-    if (!g_samples_q15 || g_total_samples == 0 || s_state != AE_STATE_PLAYING) {
-        // Serial.println(F("[AE] Reset trigger ignored - no sample or not playing"));
-        return;
-    }
-    
-    // Serial.println(F("[AE] Processing reset trigger"));
-    
-    // Force ADC input re-read/update by calling the filter update
-    adc_filter_update_from_dma();
-    
-    // Get current ADC values for loop parameters
-    const uint16_t adc_start_q12 = adc_filter_get(ADC_LOOP_START_CH);
-    const uint16_t adc_len_q12   = adc_filter_get(ADC_LOOP_LEN_CH);
-    const uint16_t adc_xfade_q12 = adc_filter_get(ADC_XFADE_LEN_CH);
-    
-    // Recalculate loop region based on current ADC values
-    const uint32_t MIN_LOOP_LEN = 64u;
-    const uint32_t span_total = (g_total_samples > MIN_LOOP_LEN) ? (g_total_samples - MIN_LOOP_LEN) : 0;
-    const uint32_t new_start = (span_total ? (uint32_t)(((uint64_t)adc_start_q12 * (uint64_t)span_total) / 4095u) : 0u);
-    const uint32_t new_len = MIN_LOOP_LEN + (span_total ? (uint32_t)(((uint64_t)adc_len_q12 * (uint64_t)span_total) / 4095u) : 0u);
-    uint32_t new_end = new_start + new_len;
-    if (new_end > g_total_samples) new_end = g_total_samples;
-    
-    // Calculate crossfade length if specified
-    uint32_t xfade_len = 0;
-    if (adc_xfade_q12 > 0) {
-        const uint32_t active_len = new_end - new_start;
-        if (active_len > 1) {
-            const uint32_t max_xfade_samples = active_len / 2;  // 50% of loop length
-            xfade_len = (uint32_t)(((uint64_t)max_xfade_samples * (uint64_t)adc_xfade_q12) >> 12);
-            if (xfade_len >= active_len) xfade_len = active_len - 1;
-        }
-    }
-    
-    // Apply minimum crossfade length if no user crossfade specified
-    if (xfade_len == 0) {
-        const uint32_t active_len = new_end - new_start;
-        const uint32_t MIN_XF_SAMPLES = 8u;
-        xfade_len = (active_len > MIN_XF_SAMPLES) ? MIN_XF_SAMPLES : (active_len > 1 ? 1u : 0u);
-    }
-    
-    // Reset phase accumulator to 0 (start of new loop region)
-    g_phase_q32_32 = ((uint64_t)new_start) << 32;
-    
-    // If crossfade is specified, we need to set up crossfade state
-    // This will be handled in the audio render loop when it detects the crossfade
-    if (xfade_len > 0) {
-        // Serial.printf("[AE] Reset trigger: crossfade length = %u samples\n", xfade_len);
-        // The crossfade will be initiated in the next audio block
-        // by the existing crossfade logic in ae_render_block()
-    } else {
-        // Serial.println(F("[AE] Reset trigger: immediate reset (no crossfade)"));
-    }
-    
-    // Serial.printf("[AE] Reset trigger: new loop region [%u, %u), length %u\n", 
-    //               new_start, new_end, new_end - new_start);
-}
+
 
 // ── Loop LED Functions ─────────────────────────────────────────────────────────
 

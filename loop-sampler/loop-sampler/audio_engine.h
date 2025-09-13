@@ -102,12 +102,14 @@ ae_mode_t  audio_engine_get_mode(void);
 // ── Reset trigger control ─────────────────────────────────────────────
 void audio_engine_reset_trigger_init(void);  // Initialize GPIO18 for reset trigger
 void audio_engine_reset_trigger_poll(void);  // Poll for reset trigger (call from main loop)
-void audio_engine_reset_trigger_handle(void); // Handle pending reset trigger
 
 // ── Loop LED control ─────────────────────────────────────────────
 void audio_engine_loop_led_init(void);       // Initialize GPIO15 for loop LED
 void audio_engine_loop_led_update(void);     // Update LED state (call from main loop)
 void audio_engine_loop_led_blink(void);      // Trigger LED blink on loop wrap
+
+// ── Loop boundaries control ──────────────────────────────────────
+void ae_reset_loop_boundaries_flag(void);    // Reset loop boundaries calculation flag
 
 
                                  // Fill the current PWM DMA half-buffer. Assumes:
