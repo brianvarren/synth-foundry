@@ -111,6 +111,10 @@ void audio_engine_loop_led_blink(void);      // Trigger LED blink on loop wrap
 // ── Loop boundaries control ──────────────────────────────────────
 void ae_reset_loop_boundaries_flag(void);    // Reset loop boundaries calculation flag
 
+// ── Mode switch control ──────────────────────────────────────────
+void audio_engine_mode_switch_init(void);    // Initialize GPIO16/17 for mode switch
+void audio_engine_mode_switch_poll(void);    // Poll for mode switch changes (call from main loop)
+
 
                                  // Fill the current PWM DMA half-buffer. Assumes:
 //  - out_buf_ptr points at the active half

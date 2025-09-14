@@ -180,6 +180,12 @@ void ae_render_block(const int16_t* samples,
   if (INC < (1ULL << 28)) INC = (1ULL << 28);  // Minimum: ~0.015x speed (very slow)
   if (INC > (1ULL << 36)) INC = (1ULL << 36);  // Maximum: ~16x speed (very fast)
 
+  // ── Apply playback direction (forward/reverse) ─────────────────────────────
+  // Use signed increment to support reverse playback based on engine mode
+  const ae_mode_t mode_now = audio_engine_get_mode();
+  const bool kIsReverse = (mode_now == AE_MODE_REVERSE);
+  const int64_t INC_SIGNED = kIsReverse ? -((int64_t)INC) : (int64_t)INC;
+
    // ── Loop Boundary Variables ────────────────────────────────────────────────────
    // These variables hold the calculated loop boundaries for crossfade operations
    static uint32_t pending_start = 0;
@@ -238,9 +244,15 @@ void ae_render_block(const int16_t* samples,
       s_cf_steps_rem = steps;
       
       // Set up tail region (old loop, fading out)
-      // This is the region we're transitioning FROM
-      s_cf_tail_start = (uint32_t)(crossfade_start_q >> 32);
-      s_cf_tail_end = s_cf_tail_start + xf_len_eff;
+      // Direction-aware tail region boundaries
+      if (kIsReverse) {
+        const uint32_t cf_start_samp = (uint32_t)(crossfade_start_q >> 32);
+        s_cf_tail_start = (cf_start_samp > xf_len_eff) ? (cf_start_samp - xf_len_eff) : 0u;
+        s_cf_tail_end   = cf_start_samp;
+      } else {
+        s_cf_tail_start = (uint32_t)(crossfade_start_q >> 32);
+        s_cf_tail_end = s_cf_tail_start + xf_len_eff;
+      }
       s_cf_tail_q = phase_now_q;  // Start from current position
       
       // Set up head region (new loop, fading in)
@@ -250,9 +262,24 @@ void ae_render_block(const int16_t* samples,
       
       // Calculate phase offset to keep content aligned between old and new regions
       // This prevents pitch shifts during crossfade
-      uint32_t k = (uint32_t)((phase_now_q - crossfade_start_q) >> 32);  // 0..xf_len_eff-1
-      if (k >= xf_len_eff) k = xf_len_eff - 1; // guard against overflow
-      s_cf_head_q = (((uint64_t)pending_start + (uint64_t)k) << 32);
+      if (kIsReverse) {
+        // Integer sample offset from crossfade boundary into the tail window
+        uint32_t k_raw = (uint32_t)((crossfade_start_q - phase_now_q) >> 32);  // distance from boundary
+        // Cap effective crossfade length to avoid head wrap if pending is tiny
+        uint32_t pending_len_now = (s_cf_head_end > s_cf_head_start) ? (s_cf_head_end - s_cf_head_start) : 1u;
+        uint32_t xf_eff = xf_len_eff;
+        if (xf_eff >= pending_len_now) xf_eff = pending_len_now - 1u;
+        if (xf_eff == 0u) xf_eff = 1u; // guard
+        uint32_t k = (k_raw < xf_eff) ? k_raw : (xf_eff - 1u);
+        // Set tail and head phases from the same k for tight alignment
+        s_cf_tail_q = crossfade_start_q - (((uint64_t)k) << 32);
+        uint32_t head_index = (pending_end > 0) ? (pending_end - 1u - k) : 0u;
+        s_cf_head_q = ((uint64_t)head_index) << 32;
+      } else {
+        uint32_t k = (uint32_t)((phase_now_q - crossfade_start_q) >> 32);  // 0..xf_len_eff-1
+        if (k >= xf_len_eff) k = xf_len_eff - 1; // guard against overflow
+        s_cf_head_q = (((uint64_t)pending_start + (uint64_t)k) << 32);
+      }
       
       // Clear reset trigger flag (crossfade is now initiated)
       g_reset_trigger_pending = false;
@@ -280,13 +307,19 @@ void ae_render_block(const int16_t* samples,
     // 2. Check if we're approaching the crossfade point (BEFORE calculating boundaries)
     // Note: This is just a preliminary check - the real detection happens in the hot loop
     if (!should_initiate_crossfade && s_cf_steps_rem == 0) {  // Not currently crossfading
-      // Ensure crossfade start point is valid (not before loop start)
-      const uint32_t crossfade_start_sample = (s_active_end > xf_len) ? (s_active_end - xf_len) : s_active_start;
-      const uint64_t crossfade_start = ((uint64_t)crossfade_start_sample) << 32;
-      const uint64_t current_phase = *io_phase_q32_32;
-      const uint64_t next_phase = current_phase + INC;
+      // Direction-aware crossfade approach detection
+      const ae_mode_t mode_now_blk = audio_engine_get_mode();
+      const bool is_rev_blk = (mode_now_blk == AE_MODE_REVERSE);
+      const uint32_t crossfade_start_sample = is_rev_blk
+        ? ((s_active_start + xf_len <= s_active_end) ? (s_active_start + xf_len) : s_active_end)
+        : ((s_active_end > xf_len) ? (s_active_end - xf_len) : s_active_start);
+      const int64_t crossfade_start = ((int64_t)crossfade_start_sample) << 32;
+      const int64_t current_phase = (int64_t)(*io_phase_q32_32);
+      const int64_t next_phase = current_phase + (is_rev_blk ? -((int64_t)INC) : (int64_t)INC);
       
-      if ((xf_len > 0) && (current_phase < crossfade_start) && (next_phase >= crossfade_start)) {
+      const bool crossed_forward = (!is_rev_blk) && (current_phase < crossfade_start) && (next_phase >= crossfade_start);
+      const bool crossed_reverse = ( is_rev_blk) && (current_phase > crossfade_start) && (next_phase <= crossfade_start);
+      if ((xf_len > 0) && (crossed_forward || crossed_reverse)) {
         // We're about to enter the crossfade region - need fresh boundaries!
         audio_engine_loop_led_blink();
         need_fresh_boundaries = true;
@@ -324,7 +357,11 @@ void ae_render_block(const int16_t* samples,
    // 5. Initiate crossfade if triggered
    if (should_initiate_crossfade) {
      // Ensure crossfade start point is valid (not before loop start)
-     const uint32_t crossfade_start_sample = (s_active_end > xf_len) ? (s_active_end - xf_len) : s_active_start;
+     const ae_mode_t mode_now_blk2 = audio_engine_get_mode();
+     const bool is_rev_blk2 = (mode_now_blk2 == AE_MODE_REVERSE);
+     const uint32_t crossfade_start_sample = is_rev_blk2
+       ? ((s_active_start + xf_len <= s_active_end) ? (s_active_start + xf_len) : s_active_end)
+       : ((s_active_end > xf_len) ? (s_active_end - xf_len) : s_active_start);
      const uint64_t crossfade_start = ((uint64_t)crossfade_start_sample) << 32;
      setup_crossfade(*io_phase_q32_32, crossfade_start);
    }
@@ -346,22 +383,28 @@ void ae_render_block(const int16_t* samples,
   // ── Sample Interpolation Function ──────────────────────────────────────────────
   // This lambda function converts a Q32.32 phase value to an interpolated Q15 sample
   // It handles bounds checking, sample lookup, and hardware-accelerated interpolation
-  auto sample_q15_from_phase = [&](uint64_t phase, uint32_t start, uint32_t end_excl) -> int16_t {
+  auto sample_q15_from_phase = [&](int64_t phase, uint32_t start, uint32_t end_excl) -> int16_t {
      // Early exit for invalid ranges - return silence
      if (end_excl == 0 || start >= end_excl) return 0;  // 0 is Q15 silence
     
-    // Convert end position to Q32.32 format and clamp phase
-    const uint64_t end_q = ((uint64_t)end_excl) << 32;
-    if (phase >= end_q) phase = end_q - 1;
+    // Convert bounds to Q32.32 format and clamp phase
+    const int64_t start_q = ((int64_t)start) << 32;
+    const int64_t end_q   = ((int64_t)end_excl) << 32;
+    if (phase < start_q) phase = start_q;
+    if (phase >= end_q)  phase = end_q - 1;
     
     // Extract integer sample index and clamp to valid range
     uint32_t i = (uint32_t)(phase >> 32);
     if (i < start) i = start;
     if (i >= end_excl) i = end_excl - 1;
     
-      // Get second sample for interpolation (with wrapping)
-    uint32_t i2 = i + 1; 
-      if (i2 >= end_excl) i2 = start;  // wrap to loop start for interpolation continuity
+    // Get second sample for interpolation (with wrapping) and direction awareness
+    uint32_t i2;
+    if (kIsReverse) {
+      i2 = (i > start) ? (i - 1) : (end_excl - 1);
+    } else {
+      i2 = (i < end_excl - 1) ? (i + 1) : start;
+    }
     
     // Extract fractional part for interpolation (8-bit precision)
     const uint32_t frac32 = (uint32_t)(phase & 0xFFFFFFFFull);
@@ -379,7 +422,7 @@ void ae_render_block(const int16_t* samples,
   };
 
   // ── Initialize Audio Processing State ──────────────────────────────────────────
-  uint64_t phase_q = *io_phase_q32_32;  // Current playback position (Q32.32)
+  int64_t phase_q = (int64_t)(*io_phase_q32_32);  // Current playback position (Q32.32, signed for bi-dir)
  
   // ── Unified Sample Processing Lambda ────────────────────────────────────────────
   // This lambda handles filtering and PWM conversion for both normal and crossfade samples
@@ -406,8 +449,8 @@ void ae_render_block(const int16_t* samples,
     
     // Get samples from both the old (tail) and new (head) loop regions
     // These will be mixed together with varying gains
-    const int16_t a_q15 = sample_q15_from_phase(s_cf_tail_q, s_cf_tail_start, s_cf_tail_end);
-    const int16_t b_q15 = sample_q15_from_phase(s_cf_head_q, s_cf_head_start, s_cf_head_end);
+    const int16_t a_q15 = sample_q15_from_phase((int64_t)s_cf_tail_q, s_cf_tail_start, s_cf_tail_end);
+    const int16_t b_q15 = sample_q15_from_phase((int64_t)s_cf_head_q, s_cf_head_start, s_cf_head_end);
     
     // Mix the two samples with constant power crossfade
     // Constant power prevents volume dips during the transition
@@ -423,25 +466,30 @@ void ae_render_block(const int16_t* samples,
     process_sample(crossfade_q15, sample_index);
     
     // Advance both playheads by the phase increment
-    s_cf_tail_q += INC;
-    s_cf_head_q += INC;
+    s_cf_tail_q = (uint64_t)((int64_t)s_cf_tail_q + INC_SIGNED);
+    s_cf_head_q = (uint64_t)((int64_t)s_cf_head_q + INC_SIGNED);
     
     // Wrap playheads within their region boundaries to prevent silence
     // This is crucial for short loops where playheads might hit the end quickly
-    const uint64_t tail_span_q = ((uint64_t)(s_cf_tail_end - s_cf_tail_start)) << 32;
-    const uint64_t head_span_q = ((uint64_t)(s_cf_head_end - s_cf_head_start)) << 32;
+    const int64_t tail_start_q = ((int64_t)s_cf_tail_start) << 32;
+    const int64_t tail_end_q   = ((int64_t)s_cf_tail_end) << 32;
+    const int64_t head_start_q = ((int64_t)s_cf_head_start) << 32;
+    const int64_t head_end_q   = ((int64_t)s_cf_head_end) << 32;
+    const int64_t tail_span_q  = tail_end_q - tail_start_q;
+    const int64_t head_span_q  = head_end_q - head_start_q;
     
-    while (s_cf_tail_q >= (((uint64_t)s_cf_tail_end) << 32)) {
-      s_cf_tail_q -= tail_span_q;  // Wrap to beginning of tail region
-    }
-    while (s_cf_head_q >= (((uint64_t)s_cf_head_end) << 32)) {
-      s_cf_head_q -= head_span_q;  // Wrap to beginning of head region
+    if (INC_SIGNED >= 0) {
+      while ((int64_t)s_cf_tail_q >= tail_end_q) s_cf_tail_q -= (uint64_t)tail_span_q;
+      while ((int64_t)s_cf_head_q >= head_end_q) s_cf_head_q -= (uint64_t)head_span_q;
+    } else {
+      while ((int64_t)s_cf_tail_q < tail_start_q) s_cf_tail_q += (uint64_t)tail_span_q;
+      while ((int64_t)s_cf_head_q < head_start_q) s_cf_head_q += (uint64_t)head_span_q;
     }
     
     // Check if crossfade is complete
     if (--s_cf_steps_rem == 0) { 
       // Crossfade complete - switch to new loop region
-      phase_q = s_cf_head_q;  // Switch to new region
+      phase_q = (int64_t)s_cf_head_q;  // Switch to new region
       s_active_start = pending_start;
       s_active_end = pending_end;
       g_loop_boundaries_calculated = false;  // Force recalculation next loop
@@ -464,39 +512,44 @@ void ae_render_block(const int16_t* samples,
      }
 
       // ── Normal Playback Processing ────────────────────────────────────────────────
-      // Advance phase for next sample
-      phase_q += INC;
+      // Advance phase for next sample (direction-aware)
+      phase_q += INC_SIGNED;
   
       // ── Per-Sample Crossfade Detection ─────────────────────────────────────────────
       // Check if we've crossed the crossfade start point (per-sample detection)
       if (s_cf_steps_rem == 0 && xf_len > 0) {  // Not currently crossfading and crossfade enabled
-        // Ensure crossfade start point is valid (not before loop start)
-        const uint32_t crossfade_start_sample = (s_active_end > xf_len) ? (s_active_end - xf_len) : s_active_start;
-        const uint64_t crossfade_start = ((uint64_t)crossfade_start_sample) << 32;
+        const uint32_t crossfade_start_sample = kIsReverse
+          ? ((s_active_start + xf_len <= s_active_end) ? (s_active_start + xf_len) : s_active_end)
+          : ((s_active_end > xf_len) ? (s_active_end - xf_len) : s_active_start);
+        const int64_t crossfade_start = ((int64_t)crossfade_start_sample) << 32;
         
-        if (phase_q >= crossfade_start) {
+        // Detect true crossing using previous and current phases
+        const int64_t prev_phase = phase_q - INC_SIGNED;
+        const bool crossed_forward = (!kIsReverse) && (prev_phase < crossfade_start) && (phase_q >= crossfade_start);
+        const bool crossed_reverse = ( kIsReverse) && (prev_phase > crossfade_start) && (phase_q <= crossfade_start);
+        if (crossed_forward || crossed_reverse) {
           // We've crossed the crossfade start point! Trigger crossfade immediately
           // Calculate fresh boundaries and initiate crossfade
           calculate_loop_boundaries();
           g_loop_boundaries_calculated = true;
           
           // Set up crossfade with current phase and crossfade start
-          setup_crossfade(phase_q, crossfade_start);
+          setup_crossfade((uint64_t)phase_q, (uint64_t)crossfade_start);
           
           // Process this sample as a crossfade sample
           bool crossfade_complete = process_crossfade_step(n);
-        continue;  // Skip normal playback processing
+          continue;  // Skip normal playback processing
         }
       }
   
-      // ── Loop Wrap Detection ────────────────────────────────────────────────────────
-      // If we've reached the end of the loop, we should already be in a crossfade
-      // If not, something went wrong - just wrap to the beginning
-      uint32_t idx = (uint32_t)(phase_q >> 32);
-      if (idx >= s_active_end || idx >= total_samples) {
-        // This should not happen if crossfade logic is working correctly
-        // Just wrap to the beginning as a fallback
-        phase_q = ((uint64_t)s_active_start) << 32;
+      // ── Loop Wrap Detection (direction-aware fallback) ───────────────────────────
+      const int64_t act_start_q = ((int64_t)s_active_start) << 32;
+      const int64_t act_end_q   = ((int64_t)s_active_end) << 32;
+      const int64_t act_span_q  = act_end_q - act_start_q;
+      if (INC_SIGNED >= 0) {
+        while (phase_q >= act_end_q) phase_q -= act_span_q;
+      } else {
+        while (phase_q < act_start_q) phase_q += act_span_q;
       }
 
     int16_t playback_q15 = sample_q15_from_phase(phase_q, s_active_start, s_active_end);
@@ -507,7 +560,7 @@ void ae_render_block(const int16_t* samples,
 
   // ── Update Global Phase State ────────────────────────────────────────────────────────
   // Save the final phase position for the next audio block
-  *io_phase_q32_32 = phase_q;
+  *io_phase_q32_32 = (uint64_t)phase_q;
 
   // ── Update Display State ──────────────────────────────────────────────────────────────
   // Prepare visualization data for the display system (Core 1)

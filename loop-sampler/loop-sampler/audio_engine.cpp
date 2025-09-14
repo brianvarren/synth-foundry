@@ -62,6 +62,11 @@ static volatile ae_state_t s_state = AE_STATE_IDLE;  // Current playback state
 static volatile ae_mode_t  s_mode  = AE_MODE_FORWARD; // Playback direction mode
 static int8_t              s_dir   = +1;     // +1 forward, -1 reverse (used for REVERSE/ALTERNATE modes)
 
+// ── Mode Switch State ──────────────────────────────────────────────────────
+// SPDT switch state tracking for playback mode control
+static bool s_mode_switch_last_fwd = false;  // Previous forward switch state
+static bool s_mode_switch_last_rev = false;  // Previous reverse switch state
+
 // // Live playhead for UI (0..65535). 16-bit write/read is atomic on RP2-class MCUs.
 // volatile uint16_t g_playhead_norm_u16 = 0;
 
@@ -72,6 +77,73 @@ void audio_engine_set_mode(ae_mode_t m) {
     if (m == AE_MODE_REVERSE)  s_dir = -1;
     // AE_MODE_ALTERNATE keeps current s_dir until it hits a boundary
 }
+
+// ── Mode Switch Functions ───────────────────────────────────────────────────
+
+/**
+ * @brief Initialize GPIO pins for playback mode switch
+ * 
+ * Sets up GPIO16 and GPIO17 as inputs with pull-up resistors for detecting
+ * the SPDT switch position. The switch connects one pin to ground when active.
+ */
+void audio_engine_mode_switch_init(void) {
+    gpio_init(MODE_SWITCH_FWD_PIN);
+    gpio_set_dir(MODE_SWITCH_FWD_PIN, GPIO_IN);
+    gpio_pull_up(MODE_SWITCH_FWD_PIN);
+    
+    gpio_init(MODE_SWITCH_REV_PIN);
+    gpio_set_dir(MODE_SWITCH_REV_PIN, GPIO_IN);
+    gpio_pull_up(MODE_SWITCH_REV_PIN);
+    
+    // Initialize state tracking
+    s_mode_switch_last_fwd = !gpio_get(MODE_SWITCH_FWD_PIN);  // Active low
+    s_mode_switch_last_rev = !gpio_get(MODE_SWITCH_REV_PIN);  // Active low
+    
+    // Check initial switch position and set mode accordingly
+    if (s_mode_switch_last_fwd && !s_mode_switch_last_rev) {
+        audio_engine_set_mode(AE_MODE_FORWARD);
+    } else if (!s_mode_switch_last_fwd && s_mode_switch_last_rev) {
+        audio_engine_set_mode(AE_MODE_REVERSE);
+    } else {
+        // Both high or both low - default to forward
+        audio_engine_set_mode(AE_MODE_FORWARD);
+    }
+    
+    Serial.println(F("[AE] Mode switch initialized on GPIO16/17"));
+}
+
+/**
+ * @brief Poll for mode switch changes and update playback mode
+ * 
+ * This function should be called from the main loop to detect switch position
+ * changes and update the playback mode accordingly. Supports forward, reverse,
+ * and ping-pong (alternate) modes.
+ */
+void audio_engine_mode_switch_poll(void) {
+    bool current_fwd = !gpio_get(MODE_SWITCH_FWD_PIN);  // Active low
+    bool current_rev = !gpio_get(MODE_SWITCH_REV_PIN);  // Active low
+    
+    // Detect switch position changes
+    if (current_fwd != s_mode_switch_last_fwd || current_rev != s_mode_switch_last_rev) {
+        if (current_fwd && !s_mode_switch_last_fwd) {
+            // Forward switch just activated
+            audio_engine_set_mode(AE_MODE_FORWARD);
+            Serial.println(F("[AE] Mode switch: FORWARD"));
+        } else if (current_rev && !s_mode_switch_last_rev) {
+            // Reverse switch just activated
+            audio_engine_set_mode(AE_MODE_REVERSE);
+            Serial.println(F("[AE] Mode switch: REVERSE"));
+        } else if (!current_fwd && !current_rev) {
+            // Both switches inactive - default to forward
+            audio_engine_set_mode(AE_MODE_FORWARD);
+            Serial.println(F("[AE] Mode switch: FORWARD (default)"));
+        }
+        
+        s_mode_switch_last_fwd = current_fwd;
+        s_mode_switch_last_rev = current_rev;
+    }
+}
+
 
 void audio_engine_arm(bool armed) {
     if (!g_phase_q32_32) { /* optional reset */ }
