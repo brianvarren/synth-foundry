@@ -87,6 +87,49 @@ static uint32_t s_cf_head_end    = 0;  // Head region end
 static Ladder8PoleLowpassFilter s_lowpass_filter;
 static Ladder8PoleHighpassFilter s_highpass_filter;
 
+// ── TZFM (Through-Zero Frequency Modulation) State ──────────────────────────────
+// TZFM allows the frequency to go through zero, enabling reverse playback
+// through modulation without requiring direction changes
+struct TZFMState {
+    float base_ratio;           // From octave/tune knobs (calculated once per block)
+    float modulation_depth;     // 0-1, from new ADC channel (TZFM modulation depth)
+    float* modulator_buffer;    // Pre-calculated or real-time modulator (-1 to +1)
+    bool enabled;              // TZFM on/off (controlled by UI or ADC)
+    int64_t last_increment;    // For direction change detection and hysteresis
+};
+
+static TZFMState s_tzfm_state = {
+    .base_ratio = 1.0f,
+    .modulation_depth = 0.0f,
+    .modulator_buffer = nullptr,
+    .enabled = false,
+    .last_increment = 0
+};
+
+// ── TZFM Modulator Smoothing ─────────────────────────────────────────────────────
+// Simple low-pass filter to reduce clicks from rapid FM changes
+static float s_modulator_smoothed = 0.0f;
+const float MODULATOR_SMOOTHING = 0.85f;  // 0.0 = no smoothing, 1.0 = maximum smoothing
+
+// ── Crossfade Direction Locking ──────────────────────────────────────────────────
+// Lock crossfade direction when initiated to prevent direction changes during crossfade
+static bool s_cf_direction_locked = false;  // Direction when crossfade started
+static int64_t s_cf_locked_base_inc = 0;    // Base increment when crossfade started
+static uint32_t s_cf_cooldown_samples = 0;  // Cooldown to prevent rapid crossfades
+const uint32_t CROSSFADE_COOLDOWN = 64;     // 1 block minimum between crossfades
+
+// ── Modulator Pre-filtering ───────────────────────────────────────────────────────
+// Smooth modulator to prevent harsh transitions in TZFM
+void prepare_modulator_buffer(float* raw, float* filtered, uint32_t len) {
+  const float alpha = 0.7f;  // Smoothing factor
+  if (len == 0) return;
+  
+  filtered[0] = raw[0];
+  for (uint32_t i = 1; i < len; i++) {
+    filtered[i] = alpha * raw[i] + (1.0f - alpha) * filtered[i-1];
+  }
+}
+
 /**
  * @brief Main audio rendering function - processes one audio block in real-time
  * 
@@ -131,8 +174,14 @@ void ae_render_block(const int16_t* samples,
   const uint16_t adc_len_q12      = adc_filter_get(ADC_LOOP_LEN_CH);     // Loop length: 0..4095
   const uint16_t adc_xfade_q12    = adc_filter_get(ADC_XFADE_LEN_CH);    // Crossfade length: 0..4095
   const uint16_t adc_tune_q12     = adc_filter_get(ADC_TUNE_CH);         // Pitch fine tune: 0..4095
-  const uint16_t adc_lowpass_q12  = adc_filter_get(ADC_FX1_CH);          // Lowpass filter cutoff: 0..4095
-  const uint16_t adc_highpass_q12 = adc_filter_get(ADC_FX2_CH);         // Highpass filter cutoff: 0..4095
+  const uint16_t adc_tzfm_depth_q12 = adc_filter_get(ADC_TZFM_DEPTH_CH); // TZFM modulation depth: 0..4095 (ADC7)
+  const uint16_t adc_lowpass_q12  = adc_filter_get(ADC_FX1_CH);          // Lowpass filter cutoff: 0..4095 (ADC5)
+  const uint16_t adc_highpass_q12 = adc_filter_get(ADC_FX2_CH);         // Highpass filter cutoff: 0..4095 (ADC6)
+  
+  // ── Read Unfiltered FM Input Signal ────────────────────────────────────────────
+  // ADC3 provides the raw FM input signal (bypass filters for real-time modulation)
+  // adc_results_buf is already declared as volatile in ADCless.h
+  const uint16_t adc_fm_input_raw = adc_results_buf[ADC_PM_CH];          // Raw FM input: 0..4095 (ADC3)
  
    // ── Calculate Pitch Increment Once ──────────────────────────────────────────
    // Calculate the phase increment once at the beginning and use it throughout
@@ -170,6 +219,17 @@ void ae_render_block(const int16_t* samples,
     ratio_f = octave_ratio * tune_ratio;
   }
 
+  // ── Store Base Ratio for TZFM ────────────────────────────────────────────────────
+  // Store the base ratio for TZFM modulation (calculated once per block)
+  s_tzfm_state.base_ratio = ratio_f;
+  
+  // ── Update TZFM State ─────────────────────────────────────────────────────────────
+  // Update TZFM modulation depth from ADC (0..1 range)
+  s_tzfm_state.modulation_depth = (float)adc_tzfm_depth_q12 / 4095.0f;
+  
+  // Enable TZFM when modulation depth > 0 (could be made configurable)
+  s_tzfm_state.enabled = (s_tzfm_state.modulation_depth > 0.001f);
+  
   // ── Convert Pitch Ratio to Phase Increment ────────────────────────────────────
   // Convert the floating-point pitch ratio to Q32.32 fixed-point phase increment
   // Q32.32 means 32 bits integer, 32 bits fractional part for sub-sample precision
@@ -212,6 +272,9 @@ void ae_render_block(const int16_t* samples,
     // Setup crossfade: calculate length and initialize crossfade state
     // This function prepares all the state variables needed for seamless crossfading
     auto setup_crossfade = [&](uint64_t phase_now_q, uint64_t crossfade_start_q) -> void {
+      // Lock the current direction and base increment for the entire crossfade
+      s_cf_direction_locked = (INC_SIGNED < 0);
+      s_cf_locked_base_inc = (int64_t)INC;
       // Calculate crossfade length based on the shorter of active or pending loop
       // This prevents the head playhead from hitting the end early and causing silence
       const uint32_t active_len = (s_active_end > s_active_start) ? (s_active_end - s_active_start) : 1;
@@ -383,7 +446,7 @@ void ae_render_block(const int16_t* samples,
   // ── Sample Interpolation Function ──────────────────────────────────────────────
   // This lambda function converts a Q32.32 phase value to an interpolated Q15 sample
   // It handles bounds checking, sample lookup, and hardware-accelerated interpolation
-  auto sample_q15_from_phase = [&](int64_t phase, uint32_t start, uint32_t end_excl) -> int16_t {
+  auto sample_q15_from_phase = [&](int64_t phase, uint32_t start, uint32_t end_excl, bool is_reverse_now) -> int16_t {
      // Early exit for invalid ranges - return silence
      if (end_excl == 0 || start >= end_excl) return 0;  // 0 is Q15 silence
     
@@ -398,9 +461,9 @@ void ae_render_block(const int16_t* samples,
     if (i < start) i = start;
     if (i >= end_excl) i = end_excl - 1;
     
-    // Get second sample for interpolation (with wrapping) and direction awareness
+    // Get second sample for interpolation (with wrapping) using actual playback direction
     uint32_t i2;
-    if (kIsReverse) {
+    if (is_reverse_now) {
       i2 = (i > start) ? (i - 1) : (end_excl - 1);
     } else {
       i2 = (i < end_excl - 1) ? (i + 1) : start;
@@ -423,6 +486,67 @@ void ae_render_block(const int16_t* samples,
 
   // ── Initialize Audio Processing State ──────────────────────────────────────────
   int64_t phase_q = (int64_t)(*io_phase_q32_32);  // Current playback position (Q32.32, signed for bi-dir)
+
+  // ── TZFM Increment Calculation Lambda ───────────────────────────────────────────
+  // This lambda calculates the per-sample phase increment with TZFM support
+  // TZFM allows frequency to go through zero, enabling reverse playback through modulation
+  auto calculate_increment = [&](uint32_t sample_index) -> int64_t {
+    // If TZFM is disabled, use traditional direction-based increment
+    if (!s_tzfm_state.enabled) {
+      return kIsReverse ? -((int64_t)INC) : (int64_t)INC;
+    }
+    
+    // TZFM enabled - calculate modulated increment
+    float modulator = 0.0f;  // Default to no modulation
+    
+    // Get modulator value from buffer or calculate real-time from raw FM input
+    if (s_tzfm_state.modulator_buffer && sample_index < AUDIO_BLOCK_SIZE) {
+      modulator = s_tzfm_state.modulator_buffer[sample_index];  // -1 to +1
+    } else {
+      // Use raw FM input signal (ADC3) converted to -1 to +1 range
+      // Center at 2048 (midpoint), convert to bipolar
+      float raw_modulator = ((float)adc_fm_input_raw - 2048.0f) / 2048.0f;
+      if (raw_modulator < -1.0f) raw_modulator = -1.0f;
+      if (raw_modulator > 1.0f) raw_modulator = 1.0f;
+      
+      // Apply smoothing to reduce clicks from rapid FM changes
+      s_modulator_smoothed = MODULATOR_SMOOTHING * s_modulator_smoothed + (1.0f - MODULATOR_SMOOTHING) * raw_modulator;
+      modulator = s_modulator_smoothed;
+    }
+    
+    // Apply base direction to the ratio, then apply modulation
+    float base_with_direction = kIsReverse ? -s_tzfm_state.base_ratio : s_tzfm_state.base_ratio;
+    float modulated_ratio = base_with_direction * (1.0f + modulator * s_tzfm_state.modulation_depth);
+    
+    // Allow through-zero (negative ratio = reverse)
+    int64_t inc = (int64_t)(modulated_ratio * (double)(1LL << 32));
+    
+    // Safety limits (expanded for TZFM)
+    const int64_t MAX_INC = (1LL << 37);  // ~32x speed
+    const int64_t MIN_INC = -(1LL << 37); // ~32x reverse
+    if (inc > MAX_INC) inc = MAX_INC;
+    if (inc < MIN_INC) inc = MIN_INC;
+    
+    // Direction change hysteresis to prevent artifacts
+    static int32_t direction_confidence = 0;
+    const int32_t DIRECTION_THRESHOLD = 4;  // Need 4 consistent samples
+    
+    if (s_tzfm_state.last_increment != 0 && inc * s_tzfm_state.last_increment < 0) {
+      // Sign change detected - reset confidence
+      direction_confidence = 0;
+    } else {
+      // Same direction - increase confidence
+      direction_confidence = min(direction_confidence + 1, DIRECTION_THRESHOLD);
+    }
+    
+    // Only update last_increment if direction is stable
+    bool direction_stable = (direction_confidence >= DIRECTION_THRESHOLD);
+    if (direction_stable) {
+      s_tzfm_state.last_increment = inc;
+    }
+    
+    return inc;
+  };
  
   // ── Unified Sample Processing Lambda ────────────────────────────────────────────
   // This lambda handles filtering and PWM conversion for both normal and crossfade samples
@@ -447,10 +571,45 @@ void ae_render_block(const int16_t* samples,
     const uint32_t k = s_cf_steps_total - s_cf_steps_rem;  // Current step
     const uint32_t N = s_cf_steps_total;                   // Total steps
     
+    // Calculate TZFM increment for crossfade using locked base increment
+    int64_t cf_inc;
+    if (!s_tzfm_state.enabled) {
+      // No TZFM - use locked base increment with locked direction
+      cf_inc = s_cf_direction_locked ? -s_cf_locked_base_inc : s_cf_locked_base_inc;
+    } else {
+      // TZFM enabled - apply modulation to locked base increment
+      float modulator = 0.0f;
+      if (s_tzfm_state.modulator_buffer && sample_index < AUDIO_BLOCK_SIZE) {
+        modulator = s_tzfm_state.modulator_buffer[sample_index];
+      } else {
+        // Use raw FM input signal (ADC3) converted to -1 to +1 range
+        float raw_modulator = ((float)adc_fm_input_raw - 2048.0f) / 2048.0f;
+        if (raw_modulator < -1.0f) raw_modulator = -1.0f;
+        if (raw_modulator > 1.0f) raw_modulator = 1.0f;
+        
+        // Apply same smoothing as normal playback
+        s_modulator_smoothed = MODULATOR_SMOOTHING * s_modulator_smoothed + (1.0f - MODULATOR_SMOOTHING) * raw_modulator;
+        modulator = s_modulator_smoothed;
+      }
+      
+      // Apply modulation to locked base increment
+      float base_with_direction = s_cf_direction_locked ? -s_cf_locked_base_inc : s_cf_locked_base_inc;
+      float modulated_ratio = (float)base_with_direction * (1.0f + modulator * s_tzfm_state.modulation_depth);
+      cf_inc = (int64_t)modulated_ratio;
+      
+      // Apply safety limits
+      const int64_t MAX_INC = (1LL << 37);
+      const int64_t MIN_INC = -(1LL << 37);
+      if (cf_inc > MAX_INC) cf_inc = MAX_INC;
+      if (cf_inc < MIN_INC) cf_inc = MIN_INC;
+    }
+    
     // Get samples from both the old (tail) and new (head) loop regions
     // These will be mixed together with varying gains
-    const int16_t a_q15 = sample_q15_from_phase((int64_t)s_cf_tail_q, s_cf_tail_start, s_cf_tail_end);
-    const int16_t b_q15 = sample_q15_from_phase((int64_t)s_cf_head_q, s_cf_head_start, s_cf_head_end);
+    // Use actual increment direction for interpolation
+    bool is_reverse_now = (cf_inc < 0);
+    const int16_t a_q15 = sample_q15_from_phase((int64_t)s_cf_tail_q, s_cf_tail_start, s_cf_tail_end, is_reverse_now);
+    const int16_t b_q15 = sample_q15_from_phase((int64_t)s_cf_head_q, s_cf_head_start, s_cf_head_end, is_reverse_now);
     
     // Mix the two samples with constant power crossfade
     // Constant power prevents volume dips during the transition
@@ -465,9 +624,9 @@ void ae_render_block(const int16_t* samples,
     // Apply filtering and convert to PWM output
     process_sample(crossfade_q15, sample_index);
     
-    // Advance both playheads by the phase increment
-    s_cf_tail_q = (uint64_t)((int64_t)s_cf_tail_q + INC_SIGNED);
-    s_cf_head_q = (uint64_t)((int64_t)s_cf_head_q + INC_SIGNED);
+    // Advance both playheads using TZFM modulation (apply TZFM during crossfades too!)
+    s_cf_tail_q = (uint64_t)((int64_t)s_cf_tail_q + cf_inc);
+    s_cf_head_q = (uint64_t)((int64_t)s_cf_head_q + cf_inc);
     
     // Wrap playheads within their region boundaries to prevent silence
     // This is crucial for short loops where playheads might hit the end quickly
@@ -478,12 +637,29 @@ void ae_render_block(const int16_t* samples,
     const int64_t tail_span_q  = tail_end_q - tail_start_q;
     const int64_t head_span_q  = head_end_q - head_start_q;
     
-    if (INC_SIGNED >= 0) {
-      while ((int64_t)s_cf_tail_q >= tail_end_q) s_cf_tail_q -= (uint64_t)tail_span_q;
-      while ((int64_t)s_cf_head_q >= head_end_q) s_cf_head_q -= (uint64_t)head_span_q;
-    } else {
-      while ((int64_t)s_cf_tail_q < tail_start_q) s_cf_tail_q += (uint64_t)tail_span_q;
-      while ((int64_t)s_cf_head_q < head_start_q) s_cf_head_q += (uint64_t)head_span_q;
+    // Smooth bidirectional wrapping for crossfade playheads (TZFM can change direction mid-crossfade!)
+    // Tail region wrapping
+    if (tail_span_q > 0) {
+      int64_t tail_normalized = (int64_t)s_cf_tail_q - tail_start_q;
+      if (tail_normalized >= tail_span_q) {
+        tail_normalized = tail_normalized % tail_span_q;
+      } else if (tail_normalized < 0) {
+        tail_normalized = tail_span_q - ((-tail_normalized) % tail_span_q);
+        if (tail_normalized == tail_span_q) tail_normalized = 0;
+      }
+      s_cf_tail_q = (uint64_t)(tail_start_q + tail_normalized);
+    }
+    
+    // Head region wrapping
+    if (head_span_q > 0) {
+      int64_t head_normalized = (int64_t)s_cf_head_q - head_start_q;
+      if (head_normalized >= head_span_q) {
+        head_normalized = head_normalized % head_span_q;
+      } else if (head_normalized < 0) {
+        head_normalized = head_span_q - ((-head_normalized) % head_span_q);
+        if (head_normalized == head_span_q) head_normalized = 0;
+      }
+      s_cf_head_q = (uint64_t)(head_start_q + head_normalized);
     }
     
     // Check if crossfade is complete
@@ -493,69 +669,102 @@ void ae_render_block(const int16_t* samples,
       s_active_start = pending_start;
       s_active_end = pending_end;
       g_loop_boundaries_calculated = false;  // Force recalculation next loop
+      
+      // Start crossfade cooldown to prevent rapid triggering
+      s_cf_cooldown_samples = CROSSFADE_COOLDOWN;
+      
       return true;  // Crossfade complete
     }
     
     return false;  // Crossfade continues
   };
  
-   // ── Main Audio Processing Loop ─────────────────────────────────────────────────
-   // Process each sample in the audio block (AUDIO_BLOCK_SIZE = 16 samples)
-   for (uint32_t n = 0; n < AUDIO_BLOCK_SIZE; ++n) {
-     
-      // ── Crossfade Processing ──────────────────────────────────────────────────────
-      // If we're currently crossfading between loop regions, handle the crossfade
-      if (s_cf_steps_rem) {
-        // Process one complete crossfade step (sample mixing + playhead wrapping + completion check)
-        bool crossfade_complete = process_crossfade_step(n);
-       continue;  // Skip normal playback processing
-     }
+  // ── Zone-based Crossfade Detection ──────────────────────────────────────────────
+  // Use current base direction for zone detection (hardware switch state)
+  auto is_in_crossfade_zone = [&](int64_t phase) -> bool {
+    uint32_t idx = (uint32_t)(phase >> 32);
+    
+    // Calculate zones based on current base direction (hardware switch)
+    if (kIsReverse) {  // Hardware switch in reverse mode
+      uint32_t zone_start = s_active_start;
+      uint32_t zone_end = min(s_active_start + xf_len, s_active_end);
+      return (idx >= zone_start && idx < zone_end);
+    } else {
+      uint32_t zone_start = (s_active_end > xf_len) ? (s_active_end - xf_len) : s_active_start;
+      return (idx >= zone_start && idx < s_active_end);
+    }
+  };
 
-      // ── Normal Playback Processing ────────────────────────────────────────────────
-      // Advance phase for next sample (direction-aware)
-      phase_q += INC_SIGNED;
+  // ── Main Audio Processing Loop ─────────────────────────────────────────────────
+  // Process each sample in the audio block (AUDIO_BLOCK_SIZE = 64 samples)
+  static bool was_in_crossfade_zone_last_sample = false;
   
-      // ── Per-Sample Crossfade Detection ─────────────────────────────────────────────
-      // Check if we've crossed the crossfade start point (per-sample detection)
-      if (s_cf_steps_rem == 0 && xf_len > 0) {  // Not currently crossfading and crossfade enabled
+  for (uint32_t n = 0; n < AUDIO_BLOCK_SIZE; ++n) {
+    // Step 1: Calculate increment (TZFM happens here)
+    int64_t inc = calculate_increment(n);
+    
+    // Step 2: Handle active crossfade (if any)
+    if (s_cf_steps_rem) {
+      process_crossfade_step(n);  // Uses locked direction
+      continue;
+    }
+    
+    // Step 3: Advance phase with TZFM increment
+    phase_q += inc;
+    
+    // Step 4: Smooth bidirectional wrapping for TZFM
+    const int64_t start_q = ((int64_t)s_active_start) << 32;
+    const int64_t end_q = ((int64_t)s_active_end) << 32;
+    const int64_t span_q = end_q - start_q;
+    
+    // Smooth wrapping that handles rapid direction changes
+    if (span_q > 0) {
+      // Normalize phase to loop span, then wrap
+      int64_t normalized_phase = phase_q - start_q;
+      
+      // Handle large jumps by using modulo instead of while loops
+      if (normalized_phase >= span_q) {
+        normalized_phase = normalized_phase % span_q;
+      } else if (normalized_phase < 0) {
+        normalized_phase = span_q - ((-normalized_phase) % span_q);
+        if (normalized_phase == span_q) normalized_phase = 0;
+      }
+      
+      // Convert back to absolute phase
+      phase_q = start_q + normalized_phase;
+    }
+    
+    // Step 5: Check for crossfade trigger (with cooldown)
+    if (s_cf_cooldown_samples == 0 && xf_len > 0) {
+      bool currently_in_zone = is_in_crossfade_zone(phase_q);
+      if (currently_in_zone && !was_in_crossfade_zone_last_sample) {
+        // Edge detection - we just entered the crossfade zone
+        calculate_loop_boundaries();
+        g_loop_boundaries_calculated = true;
+        
+        // Calculate crossfade start point based on current base direction
         const uint32_t crossfade_start_sample = kIsReverse
           ? ((s_active_start + xf_len <= s_active_end) ? (s_active_start + xf_len) : s_active_end)
           : ((s_active_end > xf_len) ? (s_active_end - xf_len) : s_active_start);
-        const int64_t crossfade_start = ((int64_t)crossfade_start_sample) << 32;
+        const uint64_t crossfade_start = ((uint64_t)crossfade_start_sample) << 32;
         
-        // Detect true crossing using previous and current phases
-        const int64_t prev_phase = phase_q - INC_SIGNED;
-        const bool crossed_forward = (!kIsReverse) && (prev_phase < crossfade_start) && (phase_q >= crossfade_start);
-        const bool crossed_reverse = ( kIsReverse) && (prev_phase > crossfade_start) && (phase_q <= crossfade_start);
-        if (crossed_forward || crossed_reverse) {
-          // We've crossed the crossfade start point! Trigger crossfade immediately
-          // Calculate fresh boundaries and initiate crossfade
-          calculate_loop_boundaries();
-          g_loop_boundaries_calculated = true;
-          
-          // Set up crossfade with current phase and crossfade start
-          setup_crossfade((uint64_t)phase_q, (uint64_t)crossfade_start);
-          
-          // Process this sample as a crossfade sample
-          bool crossfade_complete = process_crossfade_step(n);
-          continue;  // Skip normal playback processing
-        }
+        setup_crossfade((uint64_t)phase_q, crossfade_start);
+        process_crossfade_step(n);
+        continue;
       }
-  
-      // ── Loop Wrap Detection (direction-aware fallback) ───────────────────────────
-      const int64_t act_start_q = ((int64_t)s_active_start) << 32;
-      const int64_t act_end_q   = ((int64_t)s_active_end) << 32;
-      const int64_t act_span_q  = act_end_q - act_start_q;
-      if (INC_SIGNED >= 0) {
-        while (phase_q >= act_end_q) phase_q -= act_span_q;
-      } else {
-        while (phase_q < act_start_q) phase_q += act_span_q;
+      was_in_crossfade_zone_last_sample = currently_in_zone;
+    } else {
+      // Decrement cooldown counter
+      if (s_cf_cooldown_samples > 0) {
+        s_cf_cooldown_samples--;
       }
-
-    int16_t playback_q15 = sample_q15_from_phase(phase_q, s_active_start, s_active_end);
+      was_in_crossfade_zone_last_sample = false;
+    }
     
-     // Process the normal playback sample using unified processing
-     process_sample(playback_q15, n);
+    // Step 6: Normal sample playback
+    bool is_reverse_now = (inc < 0);
+    int16_t sample = sample_q15_from_phase(phase_q, s_active_start, s_active_end, is_reverse_now);
+    process_sample(sample, n);
   }
 
   // ── Update Global Phase State ────────────────────────────────────────────────────────
