@@ -209,6 +209,10 @@ void setup() {
   Serial.println("Boot: Initializing loop LED...");
   audio_engine_loop_led_init();
 
+  // Initialize mode switch on GPIO16/17
+  Serial.println("Boot: Initializing mode switch...");
+  audio_engine_mode_switch_init();
+
   // Signal to Core 1 that setup is complete - this triggers file scanning
   // and browser initialization on the display core
   Serial.println("Boot: Signaling Core 1...");
@@ -253,10 +257,24 @@ void loop() {
   
   // Update loop LED state
   audio_engine_loop_led_update();
+
+  // Poll for mode switch changes
+  audio_engine_mode_switch_poll();
   
   // Debug output (currently disabled to maintain real-time performance)
   static uint32_t last = 0;
   static uint32_t last_debug_report = 0;
+  static ae_mode_t last_mode = AE_MODE_FORWARD;
+  
+  // Print mode changes for debugging
+  ae_mode_t current_mode = audio_engine_get_mode();
+  if (current_mode != last_mode) {
+    const char* mode_names[] = {"FORWARD", "REVERSE", "ALTERNATE"};
+    Serial.print(F("[AE] Mode changed to: "));
+    Serial.println(mode_names[current_mode]);
+    last_mode = current_mode;
+  }
+  
   // if (millis() - last >= 250) {
   //   last += 250;
   //   Serial.print('.');

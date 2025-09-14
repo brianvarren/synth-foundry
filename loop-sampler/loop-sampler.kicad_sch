@@ -8577,12 +8577,12 @@
 		(uuid "2f9ade55-8d8b-4a87-a237-eb08f7491de1")
 	)
 	(label "ENC_SW"
-		(at 128.27 130.81 180)
+		(at 189.23 113.03 0)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify right bottom)
+			(justify left bottom)
 		)
 		(uuid "3319523d-9286-44db-b4bd-18bf52ad68a6")
 	)
@@ -9321,7 +9321,7 @@
 		(uuid "b6ff2647-bdeb-4cd6-bd49-111ab938e74d")
 	)
 	(label "TUNE_KNOB"
-		(at 344.17 138.43 0)
+		(at 344.17 135.89 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -9373,7 +9373,7 @@
 		(uuid "c1641d77-871f-4964-b7a2-f9855aaf6e07")
 	)
 	(label "FM_IN"
-		(at 344.17 135.89 0)
+		(at 344.17 138.43 0)
 		(effects
 			(font
 				(size 1.27 1.27)

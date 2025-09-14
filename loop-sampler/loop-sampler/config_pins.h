@@ -23,3 +23,7 @@
 
 // ─────────────────────── Loop LED ───────────────────────
 #define LOOP_LED_PIN 15  // GPIO15 for external LED (blinks on loop wrap)
+
+// ─────────────────────── Playback Mode Switch ───────────────────────
+#define MODE_SWITCH_FWD_PIN  16  // GPIO16 for forward position (SPDT switch)
+#define MODE_SWITCH_REV_PIN  17  // GPIO17 for reverse position (SPDT switch)
