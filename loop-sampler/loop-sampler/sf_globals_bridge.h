@@ -53,10 +53,11 @@
 #define ADC_LOOP_START_CH 0  // Loop start position control
 #define ADC_LOOP_LEN_CH   1  // Loop length control  
 #define ADC_TUNE_CH       2  // Pitch fine tune control
-#define ADC_PM_CH         3  // Phase modulation (future use)
+#define ADC_PM_CH         3  // Phase modulation (FM input signal - unfiltered)
 #define ADC_XFADE_LEN_CH  4  // Crossfade length control
-#define ADC_FX1_CH        5  // Effect 1 control (future use)
-#define ADC_FX2_CH        6  // Effect 2 control (future use)
+#define ADC_FX1_CH        5  // Effect 1 control (lowpass filter)
+#define ADC_FX2_CH        6  // Effect 2 control (highpass filter)
+#define ADC_TZFM_DEPTH_CH 7  // TZFM modulation depth control
 
 // ── Crossfade Configuration ───────────────────────────────────────────────────
 // These constants define the range of crossfade lengths for seamless loop transitions
