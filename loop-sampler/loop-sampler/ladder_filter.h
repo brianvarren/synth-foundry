@@ -1,9 +1,9 @@
 /**
  * @file ladder_filter.h
- * @brief 8-pole ladder filters using fixed-point math
+ * @brief 8-pole ladder filters and saturation using fixed-point math
  * 
- * This header provides 8-pole ladder lowpass and highpass filters
- * implemented using fixed-point arithmetic for real-time audio processing.
+ * This header provides 8-pole ladder lowpass and highpass filters plus
+ * a saturation effect implemented using fixed-point arithmetic for real-time audio processing.
  * The filters are based on the classic Moog ladder filter design but extended
  * to 8 poles for more aggressive filtering characteristics.
  * 
@@ -11,6 +11,7 @@
  * 
  * **8-Pole Lowpass Filter**: Cascaded 8-pole ladder filter that attenuates high frequencies
  * **8-Pole Highpass Filter**: Cascaded 8-pole ladder filter that attenuates low frequencies
+ * **Saturation Effect**: Soft clipping saturation that adds harmonic distortion
  * 
  * ## Fixed-Point Math
  * 
@@ -22,10 +23,10 @@
  * ## Usage
  * 
  * The filters are designed to be controlled by ADC inputs (ADC5 for lowpass,
- * ADC6 for highpass) and applied to the audio output in real-time.
+ * ADC6 for saturation) and applied to the audio output in real-time.
  * 
  * @author Brian Varren
- * @version 1.0
+ * @version 1.1
  * @date 2024
  */
 
@@ -247,6 +248,88 @@ private:
 };
 
 /**
+ * @class SaturationEffect
+ * @brief Soft clipping saturation effect using fixed-point math
+ * 
+ * Implements a soft clipping saturation effect that adds harmonic distortion
+ * and warmth to the audio signal. The saturation amount is controlled by
+ * the effect coefficient (0-32767). Higher values = more saturation.
+ * 
+ * Uses a tanh-like soft clipping curve implemented with fixed-point arithmetic
+ * for real-time performance.
+ */
+class SaturationEffect {
+public:
+    SaturationEffect() : 
+        initialized(false), last_coefficient(0) {}
+    
+    /**
+     * @brief Process one audio sample through the saturation effect
+     * @param input Input sample in Q15 format (-32768 to +32767)
+     * @param coefficient Saturation coefficient (0-32767, higher = more saturation)
+     * @return Saturated output sample in Q15 format
+     */
+    inline int16_t process(int16_t input, uint16_t coefficient) {
+        // If coefficient is 0, bypass the effect
+        if (coefficient == 0) {
+            last_coefficient = 0;
+            return input;
+        }
+        
+        // Convert input to float for easier math
+        float input_f = (float)input / 32768.0f;
+        
+        // Calculate saturation amount (0.0 to 1.0)
+        float saturation_amount = (float)coefficient / 32767.0f;
+        
+        // Apply soft clipping using a tanh-like curve
+        // Scale input by saturation amount, then apply soft clipping
+        float scaled_input = input_f * (1.0f + saturation_amount * 2.0f);
+        
+        // Soft clipping using a polynomial approximation of tanh
+        float output_f;
+        if (scaled_input > 1.0f) {
+            output_f = 1.0f;
+        } else if (scaled_input < -1.0f) {
+            output_f = -1.0f;
+        } else {
+            // Polynomial approximation of tanh for soft clipping
+            // tanh(x) ≈ x - x³/3 + 2x⁵/15 (for small x)
+            float x = scaled_input;
+            float x3 = x * x * x;
+            float x5 = x3 * x * x;
+            output_f = x - (x3 / 3.0f) + (2.0f * x5 / 15.0f);
+        }
+        
+        // Mix original and saturated signal based on coefficient
+        float mix_factor = saturation_amount;
+        output_f = input_f * (1.0f - mix_factor) + output_f * mix_factor;
+        
+        // Convert back to Q15 format
+        int32_t output_i32 = (int32_t)(output_f * 32768.0f);
+        
+        // Clamp to prevent overflow
+        if (output_i32 > 32767) output_i32 = 32767;
+        if (output_i32 < -32768) output_i32 = -32768;
+        
+        last_coefficient = coefficient;
+        return (int16_t)output_i32;
+    }
+    
+    /**
+     * @brief Reset the effect state
+     */
+    inline void reset() {
+        initialized = false;
+        last_coefficient = 0;
+    }
+    
+private:
+    bool initialized;
+    uint16_t last_coefficient;  // Track coefficient changes for proper bypass
+};
+
+/**
  * @brief Convert ADC value (0-4095) to filter coefficient (0-32767)
  * 
  * Maps a 12-bit ADC value to a filter coefficient for controlling
@@ -270,6 +353,7 @@ inline uint16_t adc_to_ladder_coefficient(uint16_t adc_value) {
     
     return (uint16_t)result;
 }
+
 
 /**
  * @brief Convert ADC value to filter coefficient with linear mapping
