@@ -33,6 +33,7 @@ static volatile bool     s_pendingUpdate = false;  // ISR sets, display_tick cle
 static repeating_timer_t s_displayTimer;           // pico-sdk timer handle
 static bool              s_timerActive = false;    // track if timer is running
 
+
 // ────────────────────────── Forward declarations ─────────────────────────
 void browser_render_sample_list(void);
 
@@ -311,7 +312,7 @@ void display_on_turn(int8_t inc) {
         s_sel = next;
 
         // Keep selection within the page window
-        const int visible = 7;
+        const int visible = 6;
         if (s_sel < s_top) s_top = s_sel;
         if (s_sel >= s_top + visible) s_top = s_sel - (visible - 1);
 

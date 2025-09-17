@@ -34,6 +34,15 @@ static const int16_t* s_samples     = 0;    // Q15 pointer in PSRAM
 static uint32_t       s_sampleCount = 0;
 static uint32_t       s_sampleRate  = 0;
 
+// Cached peak values to avoid PSRAM contention during display updates
+static int16_t        s_cached_peak = 1;    // Cached peak value for normalization
+static bool           s_peak_cached = false; // Whether peak has been calculated
+
+// Cached waveform envelope data to avoid PSRAM access during display updates
+static uint8_t        s_cached_ymin[256];   // Cached min Y values for each pixel column
+static uint8_t        s_cached_ymax[256];   // Cached max Y values for each pixel column
+static bool           s_envelope_cached = false; // Whether envelope has been calculated
+
 static inline int adc12ToPx256(uint16_t v) {
   return (v * 256) >> 12;
 }
@@ -72,6 +81,56 @@ void waveform_init(const int16_t* samples, uint32_t count, uint32_t sampleRate) 
   s_samples     = samples;
   s_sampleCount = count;
   s_sampleRate  = sampleRate;
+  
+  // Calculate and cache peak value to avoid PSRAM contention during display updates
+  s_peak_cached = false;  // Reset cache flag
+  s_envelope_cached = false;  // Reset envelope cache flag
+  
+  if (samples && count > 0) {
+    // Calculate peak value for normalization (this is the only PSRAM access during init)
+    int16_t maxabs = 1;
+    const uint32_t step = (count > 4096u) ? (count / 4096u) : 1u;
+    for (uint32_t i = 0; i < count; i += step) {
+      int16_t v = samples[i];
+      int16_t a = (v < 0) ? (int16_t)-v : v;
+      if (a > maxabs) maxabs = a;
+    }
+    s_cached_peak = (maxabs < 128) ? 128 : maxabs;
+    s_peak_cached = true;
+    
+    // Cache waveform envelope data to avoid PSRAM access during display updates
+    const int W = 256;
+    const int H = 64;
+    const int mid = H / 2;
+    const double spp = (double)count / (double)W;
+    
+    for (int x = 0; x < W; ++x) {
+      uint32_t start = (uint32_t)floor((double)x * spp);
+      uint32_t end   = (uint32_t)floor((double)(x + 1) * spp);
+      if (start >= count) break;
+      if (end <= start) end = start + 1;
+      if (end > count) end = count;
+
+      int16_t cmin =  32767, cmax = -32768;
+      for (uint32_t i = start; i < end; ++i) {
+        int16_t v = samples[i];
+        if (v < cmin) cmin = v;
+        if (v > cmax) cmax = v;
+      }
+
+      int yMin = mid - ((int32_t)cmax * (H / 2)) / s_cached_peak;
+      int yMax = mid - ((int32_t)cmin * (H / 2)) / s_cached_peak;
+
+      if (yMin < 0)      yMin = 0;
+      if (yMin > H - 1)  yMin = H - 1;
+      if (yMax < 0)      yMax = 0;
+      if (yMax > H - 1)  yMax = H - 1;
+
+      s_cached_ymin[x] = (uint8_t)yMin;
+      s_cached_ymax[x] = (uint8_t)yMax;
+    }
+    s_envelope_cached = true;
+  }
 }
 
 void waveform_draw(void) {
@@ -88,49 +147,47 @@ void waveform_draw(void) {
     return;
   }
 
-  // Peak estimate for normalization
-  int16_t peak = 1;
-  {
-    const uint32_t step = (s_sampleCount > 4096u) ? (s_sampleCount / 4096u) : 1u;
-    int16_t maxabs = 1;
-    for (uint32_t i = 0; i < s_sampleCount; i += step) {
-      int16_t v = s_samples[i];
-      int16_t a = (v < 0) ? (int16_t)-v : v;
-      if (a > maxabs) maxabs = a;
+  // Use cached peak value to avoid PSRAM contention during display updates
+  int16_t peak = s_peak_cached ? s_cached_peak : 1;
+
+  // Use cached envelope data to avoid PSRAM access during display updates
+  if (s_envelope_cached) {
+    // Use pre-calculated envelope data (no PSRAM access)
+    for (int x = 0; x < W; ++x) {
+      s_wave_ymin[x] = s_cached_ymin[x];
+      s_wave_ymax[x] = s_cached_ymax[x];
+      drawWaveColumn(x, s_wave_ymin[x], s_wave_ymax[x], SHADE_WAVEFORM);
     }
-    peak = (maxabs < 128) ? 128 : maxabs;
-  }
+  } else {
+    // Fallback: calculate on-the-fly (should not happen if init was called properly)
+    const double spp = (double)s_sampleCount / (double)W;
+    for (int x = 0; x < W; ++x) {
+      uint32_t start = (uint32_t)floor((double)x * spp);
+      uint32_t end   = (uint32_t)floor((double)(x + 1) * spp);
+      if (start >= s_sampleCount) break;
+      if (end <= start) end = start + 1;
+      if (end > s_sampleCount) end = s_sampleCount;
 
-  // samples-per-pixel
-  const double spp = (double)s_sampleCount / (double)W;
+      int16_t cmin =  32767, cmax = -32768;
+      for (uint32_t i = start; i < end; ++i) {
+        int16_t v = s_samples[i];
+        if (v < cmin) cmin = v;
+        if (v > cmax) cmax = v;
+      }
 
-  // Build envelope cache and draw the waveform at full shade
-  for (int x = 0; x < W; ++x) {
-    uint32_t start = (uint32_t)floor((double)x * spp);
-    uint32_t end   = (uint32_t)floor((double)(x + 1) * spp);
-    if (start >= s_sampleCount) break;
-    if (end <= start) end = start + 1;
-    if (end > s_sampleCount) end = s_sampleCount;
+      int yMin = mid - ((int32_t)cmax * (H / 2)) / peak;
+      int yMax = mid - ((int32_t)cmin * (H / 2)) / peak;
 
-    int16_t cmin =  32767, cmax = -32768;
-    for (uint32_t i = start; i < end; ++i) {
-      int16_t v = s_samples[i];
-      if (v < cmin) cmin = v;
-      if (v > cmax) cmax = v;
+      if (yMin < 0)      yMin = 0;
+      if (yMin > H - 1)  yMin = H - 1;
+      if (yMax < 0)      yMax = 0;
+      if (yMax > H - 1)  yMax = H - 1;
+
+      s_wave_ymin[x] = (uint8_t)yMin;
+      s_wave_ymax[x] = (uint8_t)yMax;
+
+      drawWaveColumn(x, s_wave_ymin[x], s_wave_ymax[x], SHADE_WAVEFORM);
     }
-
-    int yMin = mid - ((int32_t)cmax * (H / 2)) / peak;
-    int yMax = mid - ((int32_t)cmin * (H / 2)) / peak;
-
-    if (yMin < 0)      yMin = 0;
-    if (yMin > H - 1)  yMin = H - 1;
-    if (yMax < 0)      yMax = 0;
-    if (yMax > H - 1)  yMax = H - 1;
-
-    s_wave_ymin[x] = (uint8_t)yMin;
-    s_wave_ymax[x] = (uint8_t)yMax;
-
-    drawWaveColumn(x, s_wave_ymin[x], s_wave_ymax[x], SHADE_WAVEFORM);
   }
 
   // reset loop overlay history so the first overlay tick repaints cleanly
