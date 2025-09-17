@@ -67,7 +67,7 @@ static bool was_in_zone_last_sample = false;
  
 // Filters (mono path - applied after mixing both voices)
 static Ladder8PoleLowpassFilter s_lowpass_filter;   // 8-pole ladder filter for lowpass
-static Ladder8PoleHighpassFilter s_highpass_filter; // 8-pole ladder filter for highpass
+static SaturationEffect s_saturation_effect;        // Saturation effect for warmth and distortion
 
 // TZFM (Through-Zero Frequency Modulation) state
 static float base_ratio = 1.0f;                     // Base playback speed (1.0 = normal)
@@ -116,14 +116,31 @@ static int16_t get_sample(const Voice* v, const int16_t* samples, uint32_t total
     // Extract integer sample index from Q32.32 phase
     uint32_t i = (uint32_t)(v->phase_q32_32 >> 32);
 
-   // Special case: During crossfade, allow primary voice to wrap around entire buffer
-   // This prevents silence when the primary voice plays past the loop end during fade-out
+   // Special case: During crossfade, handle primary voice buffer overflow more gracefully
+   // This prevents loud pops from discontinuity while still allowing fade-out
    if (crossfading && v == primary_voice) {
        if (i >= total_samples) {
-           i %= total_samples;  // Wrap to beginning of buffer
+           // If primary voice has significant amplitude, clamp to last sample to avoid pop
+           // If amplitude is very low, allow wrap to prevent unnecessary processing
+           if (v->amplitude > 0.1f) {
+               i = total_samples - 1;  // Clamp to last valid sample
+           } else {
+               i %= total_samples;  // Safe to wrap when nearly silent
+           }
        }
    } else {
        if (i >= total_samples) return 0;  // Normal case: silence if past buffer
+   }
+   
+   // Additional safety: If we're very close to buffer end during crossfade, 
+   // apply additional amplitude reduction to ensure smooth fade-out
+   float additional_fade = 1.0f;  // Default: no additional fade
+   if (crossfading && v == primary_voice && i >= total_samples - 8) {
+       // Calculate distance from buffer end (0-7 samples)
+       uint32_t distance_from_end = total_samples - 1 - i;
+       // Apply additional fade factor (1.0 at distance 7, 0.0 at distance 0)
+       additional_fade = (float)distance_from_end / 7.0f;
+       additional_fade = fmaxf(0.0f, fminf(1.0f, additional_fade));
    }
     
     // Get second sample for interpolation (handles loop boundaries)
@@ -142,7 +159,12 @@ static int16_t get_sample(const Voice* v, const int16_t* samples, uint32_t total
     const uint16_t u0 = (uint16_t)((int32_t)samples[i] + 32768);   // Convert -32768..32767 to 0..65535
     const uint16_t u1 = (uint16_t)((int32_t)samples[i2] + 32768);
     const uint16_t ui = interpolate(u0, u1, mu8);  // Hardware interpolation on Pico
-    return (int16_t)((int32_t)ui - 32768);  // Convert back to signed
+    int16_t sample = (int16_t)((int32_t)ui - 32768);  // Convert back to signed
+    
+    // Apply additional fade factor if near buffer end during crossfade
+    sample = (int16_t)(sample * additional_fade);
+    
+    return sample;
 }
  
 // Calculate TZFM-modulated increment for phase accumulator
@@ -248,7 +270,7 @@ void ae_render_block(const int16_t* samples,
     const uint16_t adc_tune_q12 = adc_filter_get(ADC_TUNE_CH);           // Fine tuning
     const uint16_t adc_tzfm_depth_q12 = adc_filter_get(ADC_TZFM_DEPTH_CH); // FM depth
     const uint16_t adc_lowpass_q12 = adc_filter_get(ADC_FX1_CH);         // Lowpass filter
-    const uint16_t adc_highpass_q12 = adc_filter_get(ADC_FX2_CH);        // Highpass filter
+    const uint16_t adc_saturation_q12 = adc_filter_get(ADC_FX2_CH);      // Saturation effect
     const uint16_t adc_fm_raw = adc_results_buf[ADC_PM_CH];  // Unfiltered for TZFM
      
     // ── Calculate Pitch Once ─────────────────────────────────────────────────
@@ -317,7 +339,9 @@ void ae_render_block(const int16_t* samples,
     
    // Convert crossfade length to actual samples at current playback speed
    // This accounts for pitch changes - slower playback = longer crossfade time
-   uint32_t xfade_samples_unclamped = (uint32_t)((((uint64_t)xfade_len) << 32) / (uint64_t)fabs(base_ratio * (1ULL << 32)));
+   // Add safety check to prevent division by near-zero values
+   float safe_ratio = fmaxf(0.0001f, fabs(base_ratio));  // Prevent near-zero division
+   uint32_t xfade_samples_unclamped = (uint32_t)((((uint64_t)xfade_len) << 32) / (uint64_t)(safe_ratio * (1ULL << 32)));
    uint32_t xfade_samples = xfade_samples_unclamped;
    if (xfade_samples < 16) xfade_samples = 16;  // Minimum crossfade duration
    // Note: Upper clamp removed to allow long crossfades when needed
@@ -393,28 +417,35 @@ void ae_render_block(const int16_t* samples,
          }
          
          // Mix both voices with their current amplitudes
-         int16_t sample = 0;
+         // Use int32_t for accumulation to prevent overflow during crossfade
+         int32_t sample = 0;
          bool is_rev_now = (inc < 0);  // Determine actual playback direction
          
          if (primary_voice->active && primary_voice->amplitude > 0.0f) {
              int16_t s = get_sample(primary_voice, samples, total_samples, is_rev_now);
-             sample += (int16_t)(s * primary_voice->amplitude);
+             sample += (int32_t)(s * primary_voice->amplitude);
          }
          
          if (secondary_voice->active && secondary_voice->amplitude > 0.0f) {
              int16_t s = get_sample(secondary_voice, samples, total_samples, is_rev_now);
-             sample += (int16_t)(s * secondary_voice->amplitude);
+             sample += (int32_t)(s * secondary_voice->amplitude);
          }
          
-        // Apply filters (mono path - both channels get same filtered signal)
-        uint16_t lp_coeff = adc_to_ladder_coefficient(adc_lowpass_q12);
-        sample = s_lowpass_filter.process(sample, lp_coeff);
+         // Clamp accumulated sample to prevent int16_t overflow
+         if (sample > 32767) sample = 32767;
+         if (sample < -32768) sample = -32768;
+         int16_t sample_clamped = (int16_t)sample;
+         
+        // Apply effects (mono path - both channels get same processed signal)
+        // Apply saturation first to add harmonics, then lowpass to shape them
+        uint16_t sat_coeff = adc_to_ladder_coefficient(adc_saturation_q12);
+        sample_clamped = s_saturation_effect.process(sample_clamped, sat_coeff);
         
-        uint16_t hp_coeff = adc_to_ladder_coefficient(adc_highpass_q12);
-        sample = s_highpass_filter.process(sample, hp_coeff);
+        uint16_t lp_coeff = adc_to_ladder_coefficient(adc_lowpass_q12);
+        sample_clamped = s_lowpass_filter.process(sample_clamped, lp_coeff);
         
         // Convert final sample to PWM and output to both channels
-        uint16_t pwm = q15_to_pwm_u(sample);
+        uint16_t pwm = q15_to_pwm_u(sample_clamped);
         out_buf_ptr_L[n] = pwm;  // Left channel
         out_buf_ptr_R[n] = pwm;  // Right channel (mono)
     }
