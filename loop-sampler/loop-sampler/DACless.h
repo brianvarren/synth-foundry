@@ -37,7 +37,7 @@
 #pragma once
 
 // ── Audio Output Configuration ──────────────────────────────────────────────────
-#define AUDIO_BLOCK_SIZE    16    // Audio buffer size (samples per DMA transfer)
+#define AUDIO_BLOCK_SIZE    128   // Audio buffer size (samples per DMA transfer)
 #define PIN_PWM_OUT_L       20    // PWM output pin for audio
 #define PIN_PWM_OUT_R       21    // PWM output pin for audio
 #define PWM_RESOLUTION      4096  // PWM resolution (12-bit)

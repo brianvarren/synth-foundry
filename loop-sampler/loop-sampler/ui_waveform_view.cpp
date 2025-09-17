@@ -5,6 +5,9 @@
 #include "sf_globals_bridge.h"
 #include "ui_display.h"
 
+// Browser timeout management functions
+void display_set_browser_timeout(uint32_t timeout_ms);
+
 namespace sf {
 
 // Use public FSM accessors instead of extern globals
@@ -151,7 +154,14 @@ bool waveform_on_button(void) {
 
 bool waveform_is_active(void) { return display_state() == DS_WAVEFORM; }
 
-void waveform_exit(void) { display_set_state(DS_BROWSER); browser_render_sample_list(); }
+void waveform_exit(void) { 
+  display_set_state(DS_BROWSER); 
+  browser_render_sample_list(); 
+  // Set browser timeout if we have a loaded waveform
+  if (audioData && audioSampleCount > 0u) {
+    display_set_browser_timeout(10000u);  // 10 second timeout
+  }
+}
 
 // ───────────────────────── Overlay (loop shading and playheads) ──────────
 void waveform_overlay_tick(void) {

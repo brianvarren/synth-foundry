@@ -58,6 +58,10 @@ void display_tick(void);
 void display_on_turn(int8_t inc);
 void display_on_button(void);
 
+// Browser timeout management
+void display_set_browser_timeout(uint32_t timeout_ms);
+void display_clear_browser_timeout(void);
+
 // Optional: start/stop an internal timer that calls the ISR at 'fps'
 bool display_timer_begin(uint32_t fps);   // returns true if started
 void display_timer_end(void);

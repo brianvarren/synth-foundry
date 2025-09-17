@@ -68,10 +68,10 @@ public:
             return input;
         }
         
-        // Initialize with current input if first time
+        // Initialize with zero to prevent initial transients from extreme input values
         if (!initialized) {
-            pole1 = pole2 = pole3 = pole4 = input;
-            pole5 = pole6 = pole7 = pole8 = input;
+            pole1 = pole2 = pole3 = pole4 = 0;
+            pole5 = pole6 = pole7 = pole8 = 0;
             initialized = true;
         }
         
@@ -166,10 +166,10 @@ public:
             return input;
         }
         
-        // Initialize with current input if first time
+        // Initialize with zero to prevent initial transients from extreme input values
         if (!initialized) {
-            pole1 = pole2 = pole3 = pole4 = input;
-            pole5 = pole6 = pole7 = pole8 = input;
+            pole1 = pole2 = pole3 = pole4 = 0;
+            pole5 = pole6 = pole7 = pole8 = 0;
             initialized = true;
         }
         
@@ -261,7 +261,7 @@ private:
 class SaturationEffect {
 public:
     SaturationEffect() : 
-        initialized(false), last_coefficient(0) {}
+        initialized(false), last_coefficient(0), smoothed_coefficient(0.0f) {}
     
     /**
      * @brief Process one audio sample through the saturation effect
@@ -279,8 +279,12 @@ public:
         // Convert input to float for easier math
         float input_f = (float)input / 32768.0f;
         
-        // Calculate saturation amount (0.0 to 1.0)
-        float saturation_amount = (float)coefficient / 32767.0f;
+        // Smooth the coefficient changes to prevent pops from ADC noise/glitches
+        float target_saturation = (float)coefficient / 32767.0f;
+        smoothed_coefficient = 0.99f * smoothed_coefficient + 0.01f * target_saturation;
+        
+        // Use smoothed coefficient for saturation amount (0.0 to 1.0)
+        float saturation_amount = smoothed_coefficient;
         
         // Apply soft clipping using a tanh-like curve
         // Scale input by saturation amount, then apply soft clipping
@@ -299,6 +303,11 @@ public:
             float x3 = x * x * x;
             float x5 = x3 * x * x;
             output_f = x - (x3 / 3.0f) + (2.0f * x5 / 15.0f);
+            
+            // CRITICAL FIX: Clamp polynomial output to prevent overflow
+            // The polynomial can produce values outside [-1, 1] for inputs near ±1.0
+            if (output_f > 1.0f) output_f = 1.0f;
+            if (output_f < -1.0f) output_f = -1.0f;
         }
         
         // Mix original and saturated signal based on coefficient
@@ -322,11 +331,13 @@ public:
     inline void reset() {
         initialized = false;
         last_coefficient = 0;
+        smoothed_coefficient = 0.0f;
     }
     
 private:
     bool initialized;
     uint16_t last_coefficient;  // Track coefficient changes for proper bypass
+    float smoothed_coefficient;  // Smoothed coefficient to prevent abrupt changes
 };
 
 /**
@@ -348,7 +359,9 @@ inline uint16_t adc_to_ladder_coefficient(uint16_t adc_value) {
     uint32_t result = ((uint32_t)adc_value * 32767) / 4095;
     
     // Ensure minimum coefficient for proper filtering even at lowest setting
-    if (result < 512) result = 512;  // Minimum coefficient for gentle filtering
+    // This prevents the filter from becoming completely transparent at low ADC values
+    // but means there's always some filtering happening, even at ADC = 0
+    if (result < 512) result = 512;  // Minimum coefficient for gentle filtering (~1.56% cutoff)
     if (result > 32767) result = 32767;  // Maximum coefficient
     
     return (uint16_t)result;

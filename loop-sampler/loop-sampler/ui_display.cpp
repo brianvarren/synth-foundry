@@ -26,6 +26,7 @@ static uint32_t       s_sampleRate  = 0;
 // ─────────────────────────────── FSM state ───────────────────────────────
 static DisplayState s_state = DS_SETUP;  // START IN SETUP MODE
 static uint32_t     s_tDelayUntil = 0;   // millis() deadline for DS_DELAY_TO_WAVEFORM
+static uint32_t     s_browserTimeoutUntil = 0;  // millis() deadline for browser timeout
 
 // ──────────────────────────── Timer ISR state ────────────────────────────
 static volatile bool     s_pendingUpdate = false;  // ISR sets, display_tick clears
@@ -143,6 +144,19 @@ void display_setup_complete(void) {
   // Transition to browser and render
   s_state = DS_BROWSER;
   browser_render_sample_list();
+  
+  // Auto-load the first file if available and no waveform is currently loaded
+  if (s_idx.count > 0 && (!audioData || audioSampleCount == 0u)) {
+    s_pendingIdx = 0;  // Select first file
+    s_sel = 0;         // Update selection
+    s_state = DS_LOADING;
+    s_pendingUpdate = true;  // Force immediate update
+  } else {
+    // Set browser timeout (10 seconds) if we have a loaded waveform
+    if (audioData && audioSampleCount > 0u) {
+      display_set_browser_timeout(10000u);  // 10 second timeout
+    }
+  }
 }
 
 void display_tick(void) {
@@ -207,6 +221,10 @@ void display_tick(void) {
         s_state = DS_DELAY_TO_WAVEFORM;
       } else {
         s_state = DS_BROWSER;               // back to list on failure
+        // Set browser timeout if we have a loaded waveform
+        if (audioData && audioSampleCount > 0u) {
+          display_set_browser_timeout(10000u);  // 10 second timeout
+        }
       }
 
       s_pendingIdx = -1;
@@ -232,6 +250,10 @@ void display_tick(void) {
         } else {
           s_state = DS_BROWSER;
           browser_render_sample_list();
+          // Set browser timeout if we have a loaded waveform
+          if (audioData && audioSampleCount > 0u) {
+            display_set_browser_timeout(10000u);  // 10 second timeout
+          }
         }
     #endif
       }
@@ -243,9 +265,22 @@ void display_tick(void) {
       audio_engine_play(true);
       break;
 
-    case DS_BROWSER:
+    case DS_BROWSER: {
+      // Check for browser timeout - return to waveform if user has a loaded sample
+      if (s_browserTimeoutUntil > 0 && millis() >= s_browserTimeoutUntil) {
+        s_browserTimeoutUntil = 0;  // Clear timeout
+        // If we have a loaded waveform, return to it
+        if (audioData && audioSampleCount > 0u) {
+          waveform_init((const int16_t*)audioData, audioSampleCount, currentWav.sampleRate);
+          waveform_draw();
+          s_state = DS_WAVEFORM;
+        }
+        // Otherwise stay in browser
+      }
+    } break;
+
     default:
-      // Browser view is static until user interaction
+      // Default case for unknown states
       break;
 
 #ifdef ADC_DEBUG
@@ -281,6 +316,11 @@ void display_on_turn(int8_t inc) {
         if (s_sel >= s_top + visible) s_top = s_sel - (visible - 1);
 
         browser_render_sample_list();
+        
+        // Reset browser timeout on user interaction
+        if (audioData && audioSampleCount > 0u) {
+          display_set_browser_timeout(10000u);  // 10 second timeout
+        }
       }
     } break;
 
@@ -307,6 +347,9 @@ void display_on_button(void) {
       // Capture selection and transition to LOADING
       s_pendingIdx = s_sel;
       s_state = DS_LOADING;
+      
+      // Clear browser timeout since we're loading
+      display_clear_browser_timeout();
 
       // Force an immediate update to show loading status
       s_pendingUpdate = true;
@@ -435,5 +478,14 @@ void adc_debug_exit(void) {
     browser_render_sample_list();  // switch back to browser view
 }
 #endif
+
+// ───────────────────────── Browser Timeout Management ────────────────────────
+void display_set_browser_timeout(uint32_t timeout_ms) {
+  s_browserTimeoutUntil = millis() + timeout_ms;
+}
+
+void display_clear_browser_timeout(void) {
+  s_browserTimeoutUntil = 0;
+}
 
 } // namespace sf

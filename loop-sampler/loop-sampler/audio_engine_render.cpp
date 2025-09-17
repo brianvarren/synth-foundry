@@ -384,10 +384,32 @@ void ae_render_block(const int16_t* samples,
        }
         
         // Manual trigger check (user-initiated crossfade)
-        if (g_reset_trigger_pending && !crossfading) {
-             calculate_boundaries();
-             setup_crossfade(xfade_len, xfade_samples, is_reverse);
-             audio_engine_loop_led_blink();
+        // Process reset triggers even during active crossfades - they take priority
+        if (g_reset_trigger_pending) {
+             if (!crossfading) {
+                 // Normal case: start new crossfade immediately
+                 calculate_boundaries();
+                 setup_crossfade(xfade_len, xfade_samples, is_reverse);
+                 audio_engine_loop_led_blink();
+             } else {
+                 // During crossfade: force immediate completion and start new crossfade
+                 // Complete current crossfade instantly by swapping voices
+                 Voice* temp = primary_voice;
+                 primary_voice = secondary_voice;  // New voice becomes primary
+                 secondary_voice = temp;           // Old voice becomes secondary
+                 secondary_voice->active = false;  // Silence old voice
+                 secondary_voice->amplitude = 0.0f;
+                 primary_voice->amplitude = 1.0f;  // Full volume for new voice
+                 
+                 // Reset crossfade state
+                 crossfading = false;
+                 crossfade_samples_remaining = 0;
+                 
+                 // Now start the new reset-triggered crossfade
+                 calculate_boundaries();
+                 setup_crossfade(xfade_len, xfade_samples, is_reverse);
+                 audio_engine_loop_led_blink();
+             }
          }
          
          // Handle crossfading between voices

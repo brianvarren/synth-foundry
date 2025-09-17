@@ -33,9 +33,16 @@ bool storage_load_sample_q15_psram(const char* path,
   const uint32_t required_out_bytes  = total_input_samples * 2u; // mono Q15
   if (out_required_bytes) *out_required_bytes = required_out_bytes;
 
-  // Optional headroom check
+  // Calculate available PSRAM after freeing current waveform
+  uint32_t available_psram = rp2040.getFreePSRAMHeap();
+  if (audioData && audioDataSize > 0) {
+    // If there's a current waveform, we can free it and use that space too
+    available_psram += audioDataSize;
+  }
+
+  // Check if new file will fit
   #ifdef ARDUINO_ARCH_RP2040
-  if (required_out_bytes > rp2040.getFreePSRAMHeap()) {
+  if (required_out_bytes > available_psram) {
     return false;
   }
   #endif
