@@ -1,0 +1,154 @@
+# CodeStamp Integration Rules
+
+## Overview
+CodeStamp is a professional code visualization and animation tool designed to create educational video content for complex technical concepts, specifically focused on DIY synthesis, experimental sound design, embedded computing, and audio programming.
+
+## Purpose & Context
+CodeStamp generates high-quality MP4 videos that explain:
+- **Audio Synthesis Concepts**: Oscillators, filters, envelopes, LFOs, modulation
+- **Embedded Audio Programming**: DMA, interrupts, real-time audio processing
+- **Digital Signal Processing**: FFT, filtering, delay lines, reverb algorithms
+- **Hardware Integration**: ADC/DAC, audio codecs, MIDI, CV/Gate
+- **Complex Algorithms**: Phase accumulation, through-zero FM, wavetable synthesis
+- **System Architecture**: Audio engines, ring buffers, state machines
+
+## Available Commands
+
+### Lesson Mining
+```bash
+# Extract teachable content from code files
+codestamp mine --file <source_file> --topic <lesson_name> [options]
+
+# Modes:
+--mode code      # Extract code snippets (default)
+--mode concept   # Generate concept diagrams
+--mode combo     # Both concept + code
+
+# Options:
+--max-lines <n>  # Maximum lines per snippet (default: 40)
+--duration <s>   # Default duration in seconds (default: 12)
+```
+
+### Code Rendering
+```bash
+# Render code snippets to video
+codestamp code --file <source_file> --start <line> --end <line> [options]
+
+# Options:
+--json <file>    # Use JSON specification file
+--vo <file>      # Add voice-over audio
+--output <file>  # Specify output file
+```
+
+### Diagram Rendering
+```bash
+# Render Mermaid diagrams to video
+codestamp diagram --json <diagram_spec> [options]
+
+# Options:
+--output <file>  # Specify output file
+```
+
+### Other Commands
+```bash
+codestamp themes          # List available syntax themes
+codestamp typing --json   # Create typing animations
+```
+
+## Generated File Structure
+When mining lessons, CodeStamp creates:
+```
+explainers/<topic>/
+├── units.json      # Lesson structure and metadata
+├── snippet.json    # Code animation specification
+├── diagram.mmd     # Mermaid diagram source
+├── diagram.json    # Diagram animation specification
+└── vo.txt          # Voice-over draft
+```
+
+## Theming & Visual Style
+- **Theme**: Matrix Revolution (dark, professional)
+- **Background**: #0f1a14 (Matrix Revolution dark)
+- **Text**: #9ac3ad (Matrix Revolution green)
+- **Accents**: #76cea5 (Matrix Revolution cyan)
+- **Font**: JetBrains Mono
+- **Resolution**: 1920x1080 @ 30fps
+
+## Content Mining Heuristics
+CodeStamp automatically identifies teachable content by scoring for:
+- **Cohesion**: Does it do one thing well?
+- **Narratability**: Clear mechanism + why it matters
+- **Leverage**: Unlocks understanding elsewhere
+- **Demo-ability**: Audible/visible payoff
+- **Length fit**: 12-40 lines optimal
+
+## Audio/Synthesis Focus Areas
+CodeStamp is particularly effective for:
+- **Real-time Audio**: DMA, interrupts, buffer management
+- **Oscillator Design**: Phase accumulation, wavetable synthesis
+- **Filter Implementation**: Biquad, state variable, ladder filters
+- **Modulation**: LFOs, envelopes, through-zero FM
+- **Effects**: Delay, reverb, distortion, bitcrushing
+- **MIDI/CV**: Note processing, parameter mapping
+- **Hardware Control**: ADC/DAC, codec configuration
+
+## VS Code Integration
+Available tasks in Command Palette:
+- "CodeStamp: mine lesson from current file"
+- "CodeStamp: mine concept lesson"
+- "CodeStamp: mine combo lesson"
+- "CodeStamp: render mined code snippet"
+- "CodeStamp: render mined diagram"
+
+## Usage Workflow
+1. **Open source file** with audio/synthesis code
+2. **Mine content**: `codestamp mine --file src/oscillator.cpp --topic phase-accumulation`
+3. **Review generated files** in `explainers/<topic>/`
+4. **Render videos**: Use suggested CodeStamp commands
+5. **Integrate into documentary** narrative
+
+## Example Use Cases
+```bash
+# Extract oscillator implementation
+codestamp mine --file src/oscillator.cpp --topic phase-accumulation --mode combo
+
+# Mine filter design
+codestamp mine --file src/filter.cpp --topic biquad-filter --max-lines 35
+
+# Extract DMA audio setup
+codestamp mine --file src/audio_engine.cpp --topic dma-audio --mode concept
+
+# Mine MIDI processing
+codestamp mine --file src/midi_handler.cpp --topic note-processing --mode code
+```
+
+## Output Integration
+Generated videos are designed to:
+- **Seamlessly integrate** into larger documentary narratives
+- **Explain complex concepts** visually and clearly
+- **Show code execution** with highlighting and animation
+- **Demonstrate audio concepts** with accompanying diagrams
+- **Maintain professional quality** for educational content
+
+## File Locations
+- **CLI**: `bin/codestamp`
+- **Tools**: `tools/` (render_code.js, typing_animator.js, lesson_miner.js)
+- **Diagrams**: `diagram-renderer/` (Remotion-based)
+- **Themes**: `themes/matrix-revolution.json`
+- **Examples**: `examples/` and `explainers/`
+
+## When to Use CodeStamp
+Use CodeStamp when you need to:
+- Explain complex audio algorithms visually
+- Show real-time code execution
+- Demonstrate hardware integration
+- Illustrate signal flow and data structures
+- Create educational content for technical concepts
+- Add professional code visualization to documentaries
+
+## Quality Standards
+- **Professional output**: 1920x1080 MP4 with H.264
+- **Consistent theming**: Matrix Revolution throughout
+- **Smooth animations**: 30fps with proper timing
+- **Educational focus**: Clear, teachable content
+- **Documentary ready**: High quality for production use
