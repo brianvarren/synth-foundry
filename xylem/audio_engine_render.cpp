@@ -22,6 +22,8 @@
 #include "audio_engine.h"
 #include "DACless.h"
 #include "context_params.h"
+#include "tables.h"
+#include "synth_voice.h"
 #include <Arduino.h>
 
 // Get audio rate from DACless system
@@ -37,6 +39,10 @@ static bool audio_engine_initialized = false;
 
 // Context parameter integration
 extern ContextParams contextParams;
+
+// ── Voice Management ──────────────────────────────────────────────────────────────
+// Global voice for testing (will be expanded to voice array later)
+Voice v0 = {0, 0, 0, 0, 0};
 
 // ── Helper Functions ──────────────────────────────────────────────────────────────
 
@@ -66,34 +72,13 @@ static inline int16_t generate_silence() {
     return 0;  // Q15 silence (center value)
 }
 
-/**
- * @brief Generate test tone sample
- * 
- * Generates a simple sine wave for testing purposes.
- * Frequency and amplitude are controlled by context parameters.
- * 
- * @param phase Current phase accumulator (0 to 2π)
- * @return Generated sample (-32768 to +32767)
- */
-static inline int16_t generate_test_tone(float phase) {
-    // Use consonance parameter to control frequency (0-255 maps to 0.1-2.0 Hz)
-    float freq_mult = 0.1f + (contextParams.consonance / 255.0f) * 1.9f;
-    
-    // Use density parameter to control amplitude (0-255 maps to 0.0-0.5)
-    float amplitude = (contextParams.density / 255.0f) * 0.5f;
-    
-    // Generate sine wave
-    float sample = sinf(phase * freq_mult) * amplitude;
-    
-    // Convert to Q15 format
-    return (int16_t)(sample * 32767.0f);
-}
 
 /**
  * @brief Apply context parameter effects
  * 
  * Applies various effects based on context parameters to modify the audio sample.
  * This is where the musical intelligence of the system is implemented.
+ * Uses fixed-point arithmetic for efficiency.
  * 
  * @param sample Input sample to process
  * @return Processed sample with context effects applied
@@ -101,27 +86,58 @@ static inline int16_t generate_test_tone(float phase) {
 static inline int16_t apply_context_effects(int16_t sample) {
     // Use precision parameter to control sample accuracy
     // Higher precision = more accurate reproduction
-    float precision_factor = contextParams.precision / 255.0f;
+    // Convert to Q15: precision/255 * 32767
+    int32_t precision_factor = ((int32_t)contextParams.precision * 32767) / 255;
     
     // Use pace parameter to control tempo-related effects
     // This could be used for rhythmic modulation or time-based effects
-    float pace_factor = contextParams.pace / 255.0f;
+    int32_t pace_factor = ((int32_t)contextParams.pace * 32767) / 255;
     
     // Apply precision-based quantization (simulate bit depth reduction)
-    if (precision_factor < 1.0f) {
-        int32_t quantized = (int32_t)sample * precision_factor;
+    if (precision_factor < 32767) {
+        int32_t quantized = ((int32_t)sample * precision_factor) >> 15;
         sample = (int16_t)quantized;
     }
     
     // Apply pace-based modulation (simple tremolo effect)
-    static float tremolo_phase = 0.0f;
-    tremolo_phase += 0.01f * pace_factor;  // Tremolo rate based on pace
-    if (tremolo_phase > 2.0f * M_PI) tremolo_phase -= 2.0f * M_PI;
+    // Use fixed-point phase accumulator for tremolo
+    static uint32_t tremolo_phase = 0;
+    uint32_t tremolo_inc = (pace_factor >> 8) + 1;  // Scale tremolo rate
+    tremolo_phase += tremolo_inc;
     
-    float tremolo = 1.0f + 0.1f * sinf(tremolo_phase) * pace_factor;
-    sample = (int16_t)(sample * tremolo);
+    // Generate tremolo using sine LUT
+    int16_t tremolo = interp_sine_q15(tremolo_phase);
+    tremolo = (int16_t)((tremolo * pace_factor) >> 15);  // Scale tremolo depth
+    tremolo = 32767 + (tremolo >> 3);  // Center around 1.0, reduce depth
+    
+    // Apply tremolo: sample * tremolo / 32767
+    int32_t result = ((int32_t)sample * tremolo) >> 15;
+    sample = (int16_t)result;
     
     return sample;
+}
+
+/**
+ * @brief Initialize voice with frequency and amplitude
+ * 
+ * Sets up a voice with the specified frequency and amplitude using fixed-point arithmetic.
+ * 
+ * @param voice Pointer to voice to initialize
+ * @param freq_hz Frequency in Hz
+ * @param amplitude Q15 amplitude (0 to 32767)
+ */
+static void init_voice(Voice* voice, float freq_hz, int16_t amplitude) {
+    if (!voice) return;
+    
+    // Calculate phase increment: freq_hz * 2^32 / sample_rate
+    // Using 32-bit phase accumulator for high precision
+    uint32_t inc = (uint32_t)((freq_hz * 4294967296.0f) / audio_rate);
+    
+    voice->phase = 0;
+    voice->inc = inc;
+    voice->amp_cur = amplitude;
+    voice->env = 32767;  // Full envelope for now
+    voice->active = 1;
 }
 
 // ── Main Render Function ──────────────────────────────────────────────────────────
@@ -154,15 +170,20 @@ void ae_render_block(volatile uint16_t* out_buf, uint16_t block_size) {
     // ── Generate Audio Samples ──────────────────────────────────────────────────
     // Main audio generation loop - processes one sample at a time
     
-    static float phase = 0.0f;  // Phase accumulator for test tone generation
-    
     for (uint16_t n = 0; n < block_size; n++) {
-        // Generate base audio sample
-        int16_t sample = generate_silence();  // Currently generating silence
+        // Generate base audio sample using fixed-point voice
+        int16_t sample = 0;
         
-        // TODO: Replace with actual audio generation based on context parameters
-        // For now, we could generate a test tone:
-        // sample = generate_test_tone(phase);
+        if (v0.active) {
+            // Generate sine wave using LUT
+            sample = interp_sine_q15(v0.phase);
+            
+            // Apply amplitude scaling
+            sample = (int16_t)(((int32_t)sample * v0.amp_cur) >> 15);
+            
+            // Update phase accumulator
+            v0.phase += v0.inc;
+        }
         
         // Apply context parameter effects
         sample = apply_context_effects(sample);
@@ -172,10 +193,6 @@ void ae_render_block(volatile uint16_t* out_buf, uint16_t block_size) {
         
         // Store in output buffer
         out_buf[n] = pwm;
-        
-        // Update phase for next sample (if generating tones)
-        phase += 0.01f;  // Simple phase increment
-        if (phase > 2.0f * M_PI) phase -= 2.0f * M_PI;
     }
 }
 
@@ -226,8 +243,11 @@ void audioEngineStart() {
         return;
     }
     
+    // Initialize voice with test tone (440 Hz A4, moderate amplitude)
+    init_voice(&v0, 440.0f, 16383);  // Half amplitude for safety
+    
     audio_engine_running = true;
-    Serial.println("Audio engine started");
+    Serial.println("Audio engine started with test tone (440 Hz)");
 }
 
 /**
@@ -236,6 +256,9 @@ void audioEngineStart() {
  * Disables audio generation. Output will be silence (center PWM value).
  */
 void audioEngineStop() {
+    // Deactivate voice
+    v0.active = 0;
+    
     audio_engine_running = false;
     Serial.println("Audio engine stopped");
 }
