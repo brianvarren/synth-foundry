@@ -38,9 +38,6 @@
 
 #pragma once
 
-// ── ADC Configuration ──────────────────────────────────────────────────────────
-#define NUM_ADC_INPUTS      4  // Number of analog control inputs
-
 // ── Hardware Target Selection ──────────────────────────────────────────────────
 // Uncomment the appropriate target for your hardware
 //#define ADCLESS_RP2350B     // Olimex Pico2-XXL (RP2350B)
@@ -49,8 +46,10 @@
 // ── Pin Configuration ──────────────────────────────────────────────────────────
 #ifdef ADCLESS_RP2350B
     #define BASE_ADC_PIN 40  // Starting ADC pin for RP2350B
+    #define NUM_ADC_INPUTS 8    
 #else
     #define BASE_ADC_PIN 26  // Starting ADC pin for RP2040
+    #define NUM_ADC_INPUTS 4
 #endif
 
 // ── ADC State Variables ────────────────────────────────────────────────────────
