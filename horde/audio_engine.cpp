@@ -35,10 +35,26 @@
 #include "fixed_point_utils.h"
 #include "resonant_bandpass.h"
 
+#include <math.h>
+
 // ── Audio Engine State ──────────────────────────────────────────────────────
+static constexpr int kVoiceCount = 5;
+static constexpr float kVoiceFreqRatios[kVoiceCount] = {
+    0.25f,           // -12 semitones (one octave down)
+    //0.66741993f,    // -7 semitones (perfect fifth down)
+    0.5f,           // Root
+    1.18920712f,    // +3 semitones (minor third)
+    1.49830708f,    // +7 semitones (perfect fifth)
+    2.0f            // +12 semitones (octave up)
+};
+static constexpr int16_t kVoiceGainQ15[kVoiceCount] = {
+    32767, /*28361,*/ 23170, 21247, 18929, 16384
+};
+
+static ResonantBandpass2P g_noise_filters[kVoiceCount];
 static uint32_t g_noise_state = 12345;  // PRNG state for noise generation
-static ResonantBandpass2P g_noise_filter;
-static float g_noise_filter_cutoff_hz = 50.0f;
+static int g_feedback_update_voice = 0;
+static float g_noise_filter_cutoff_hz = 110.0f;
 static float g_noise_filter_feedback = 0.98f;
 static bool g_noise_filter_inited = false;
 static bool g_noise_filter_params_dirty = true;
@@ -54,23 +70,34 @@ static bool g_noise_filter_params_dirty = true;
  * @return int16_t White noise sample in Q1.15 format
  */
 static inline int16_t generate_noise_sample() {
-    // Linear congruential generator with good spectral properties
     g_noise_state = g_noise_state * 1103515245UL + 12345UL;
-    
-    // Convert to Q1.15 format (-32768 to +32767)
     return (int16_t)((g_noise_state >> 16) ^ 0x8000);
 }
 
 static void ae_update_noise_filter() {
     if (!g_noise_filter_inited) {
-        resonant_bandpass_init(&g_noise_filter);
+        for (int voice = 0; voice < kVoiceCount; ++voice) {
+            resonant_bandpass_init(&g_noise_filters[voice]);
+        }
         g_noise_filter_inited = true;
         g_noise_filter_params_dirty = true;
     }
 
     if (g_noise_filter_params_dirty) {
-        resonant_bandpass_set_cutoff(&g_noise_filter, g_noise_filter_cutoff_hz, audio_rate);
-        resonant_bandpass_set_feedback(&g_noise_filter, g_noise_filter_feedback);
+        int32_t feedback_q15 = (int32_t)lroundf(g_noise_filter_feedback * 32767.0f);
+        if (feedback_q15 < 0) feedback_q15 = 0;
+        if (feedback_q15 > 32767) feedback_q15 = 32767;
+
+        for (int voice = 0; voice < kVoiceCount; ++voice) {
+            float voice_cutoff = g_noise_filter_cutoff_hz * kVoiceFreqRatios[voice];
+            if (voice_cutoff < 20.0f) {
+                voice_cutoff = 20.0f;
+            } else if (voice_cutoff > 8192.0f) {
+                voice_cutoff = 8192.0f;
+            }
+            resonant_bandpass_set_cutoff(&g_noise_filters[voice], voice_cutoff, audio_rate);
+            resonant_bandpass_set_feedback_q15(&g_noise_filters[voice], (int16_t)feedback_q15);
+        }
         g_noise_filter_params_dirty = false;
     }
 }
@@ -104,13 +131,17 @@ void ae_set_noise_filter(float cutoff_hz, float feedback) {
 
 void ae_reset_noise_filter() {
     if (!g_noise_filter_inited) {
-        resonant_bandpass_init(&g_noise_filter);
+        for (int voice = 0; voice < kVoiceCount; ++voice) {
+            resonant_bandpass_init(&g_noise_filters[voice]);
+        }
         g_noise_filter_inited = true;
         g_noise_filter_params_dirty = true;
         return;
     }
 
-    resonant_bandpass_reset(&g_noise_filter);
+    for (int voice = 0; voice < kVoiceCount; ++voice) {
+        resonant_bandpass_reset(&g_noise_filters[voice]);
+    }
 }
 
 /**
@@ -134,19 +165,34 @@ void ae_render_block() {
     // Map filtered ADC 0 (0..4095) to resonance feedback (Q1.15)
     const int32_t kFeedbackMaxQ15 = 32700; // keep headroom to prevent runaway
     uint16_t feedback_adc = adc_filter_get(0);
-    int32_t feedback_q15 = ((int32_t)feedback_adc * kFeedbackMaxQ15 + 2047) / 4095;
-    resonant_bandpass_set_feedback_q15(&g_noise_filter, (int16_t)feedback_q15);
+    float norm = (float)feedback_adc / 4095.0f;
+    float shaped = norm * (2.0f - norm);   // bias knob toward higher Q region
+    if (shaped < 0.0f) shaped = 0.0f;
+    if (shaped > 1.0f) shaped = 1.0f;
+    int32_t feedback_q15 = (int32_t)(shaped * kFeedbackMaxQ15 + 0.5f);
+    for (int i = 0; i < 2; ++i) {
+        int idx = (g_feedback_update_voice + i) % kVoiceCount;
+        resonant_bandpass_set_feedback_q15(&g_noise_filters[idx], (int16_t)feedback_q15);
+    }
+    g_feedback_update_voice = (g_feedback_update_voice + 2) % kVoiceCount;
     g_noise_filter_feedback = (float)feedback_q15 / 32767.0f;
 
     // Generate audio samples for the current buffer
     for (int i = 0; i < AUDIO_BLOCK_SIZE; i++) {
         // Generate white noise sample in Q1.15 format
-        int16_t audio_sample = generate_noise_sample();
+        int16_t noise_sample = generate_noise_sample();
 
-        // Shape noise into a resonant tone (cascade stages)
-        audio_sample = resonant_bandpass_process(&g_noise_filter, audio_sample);
+        int32_t accum = 0;
+        for (int voice = 0; voice < kVoiceCount; ++voice) {
+            int16_t voice_sample = resonant_bandpass_process(&g_noise_filters[voice], noise_sample);
+            int32_t weighted = ((int32_t)voice_sample * kVoiceGainQ15[voice] + 16384) >> 15;
+            accum += weighted;
+        }
 
-        // Convert Q1.15 audio sample to 12-bit PWM duty cycle
-        target[i] = q15_to_pwm(audio_sample);
+        accum >>= 2; // normalize weighted sum
+        if (accum > 32767) accum = 32767;
+        else if (accum < -32768) accum = -32768;
+
+        target[i] = q15_to_pwm((int16_t)accum);
     }
 }

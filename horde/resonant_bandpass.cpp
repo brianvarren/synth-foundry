@@ -15,7 +15,7 @@ constexpr float kDefaultCutoffHz     = 440.0f;
 constexpr float kMinCutoffHz         = 1.0f;
 constexpr float kMaxCutoffRatio      = 0.49f;
 constexpr float kMinQ                = 0.10f;
-constexpr float kMaxQ                = 60.0f;
+constexpr float kMaxQ                = 120.0f;
 const float kLogMinQ = logf(kMinQ);
 const float kLogMaxQ = logf(kMaxQ);
 
@@ -35,6 +35,32 @@ static inline int32_t float_to_q26(float value) {
         value = -31.99999f;
     }
     return (int32_t)lroundf(value * 67108864.0f); // 1 << 26
+}
+
+static inline float q26_to_float(int32_t value) {
+    return (float)value / 67108864.0f;
+}
+
+static inline float q30_to_float(int32_t value) {
+    return (float)value / 1073741824.0f;
+}
+
+static uint32_t g_feedback_r_lut_q30[256];
+static float g_feedback_q_lut[256];
+static bool g_feedback_lut_initialized = false;
+
+static void init_feedback_lut() {
+    if (g_feedback_lut_initialized) {
+        return;
+    }
+    for (int i = 0; i < 256; ++i) {
+        float feedback = (float)i / 255.0f;
+        float q = expf(kLogMinQ + feedback * (kLogMaxQ - kLogMinQ));
+        float r = 1.0f / q;
+        g_feedback_q_lut[i] = q;
+        g_feedback_r_lut_q30[i] = float_to_q30(r);
+    }
+    g_feedback_lut_initialized = true;
 }
 
 static inline int freq_to_index(float fc) {
@@ -108,6 +134,7 @@ void resonant_bandpass_init(ResonantBandpass2P* filter) {
     if (!filter) {
         return;
     }
+    init_feedback_lut();
     filter->ic1_eq = 0;
     filter->ic2_eq = 0;
     filter->q = 5.0f;
@@ -158,19 +185,36 @@ void resonant_bandpass_set_feedback(ResonantBandpass2P* filter, float feedback) 
     } else if (feedback > 0.9995f) {
         feedback = 0.9995f;
     }
-
-    const float q = expf(kLogMinQ + feedback * (kLogMaxQ - kLogMinQ));
-    if (fabsf(q - filter->q) >= 1e-3f) {
-        filter->q = q;
-        rebuild_coefficients(filter);
-    }
-    filter->bp_gain_q15 = lookup_bp_gain(filter->cutoff_hz, filter->q);
+    int32_t feedback_q15 = (int32_t)lroundf(feedback * 32767.0f);
+    if (feedback_q15 < 0) feedback_q15 = 0;
+    if (feedback_q15 > 32767) feedback_q15 = 32767;
+    resonant_bandpass_set_feedback_q15(filter, (int16_t)feedback_q15);
 }
 
 void resonant_bandpass_set_feedback_q15(ResonantBandpass2P* filter, int16_t feedback_q15) {
     if (!filter) {
         return;
     }
-    const float feedback = (float)feedback_q15 / 32767.0f;
-    resonant_bandpass_set_feedback(filter, feedback);
+    if (!g_feedback_lut_initialized) {
+        init_feedback_lut();
+    }
+
+    if (feedback_q15 < 0) feedback_q15 = 0;
+    if (feedback_q15 > 32767) feedback_q15 = 32767;
+
+    int index = feedback_q15 >> 7;  // 0..255
+    if (index > 255) index = 255;
+
+    filter->q = g_feedback_q_lut[index];
+    filter->r_q30 = g_feedback_r_lut_q30[index];
+
+    float g = q26_to_float(filter->g_q26);
+    float r = q30_to_float(filter->r_q30);
+    float denom = 1.0f + g * (g + r);
+    if (denom <= 0.0f) {
+        denom = 1.0f;
+    }
+    filter->h_q30 = float_to_q30(1.0f / denom);
+
+    filter->bp_gain_q15 = lookup_bp_gain(filter->cutoff_hz, filter->q);
 }

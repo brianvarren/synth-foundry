@@ -13,7 +13,7 @@ volatile uint16_t pwm_out_buf_b[AUDIO_BLOCK_SIZE] __attribute__((aligned(AUDIO_B
 volatile uint16_t pwm_out_buf_c[AUDIO_BLOCK_SIZE] __attribute__((aligned(AUDIO_BLOCK_SIZE * sizeof(uint16_t))));
 volatile uint16_t pwm_out_buf_d[AUDIO_BLOCK_SIZE] __attribute__((aligned(AUDIO_BLOCK_SIZE * sizeof(uint16_t))));
 
-static const uint size_bits = 5; // 128 = 8
+static const uint size_bits = 8; // AUDIO_BLOCK_SIZE * sizeof(uint16_t) = 256 bytes
 static_assert((1<<size_bits) == AUDIO_BLOCK_SIZE * sizeof(uint16_t));
 
 volatile uint16_t* out_buf_ptr_L;
