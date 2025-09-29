@@ -17,6 +17,10 @@ Adafruit_SSD1306 display(DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire1, -1);
 static bool g_display_initialized = false;
 static volatile bool g_core0_setup_complete = false;
 
+// ── Octave Control State ──────────────────────────────────────────────────────
+static uint32_t g_octave_up_last_press = 0;
+static uint32_t g_octave_down_last_press = 0;
+
 void setup() {
     Serial.begin(115200);
     uint32_t start = millis();
@@ -33,6 +37,10 @@ void setup() {
     configurePWM_DMA();
     Serial.println("✓ DAC system initialized");
 
+    // Configure octave control buttons
+    pinMode(PIN_OCTAVE_UP, INPUT_PULLUP);
+    pinMode(PIN_OCTAVE_DOWN, INPUT_PULLUP);
+
     const float block_rate_hz = audio_rate / static_cast<float>(AUDIO_BLOCK_SIZE);
     adc_filter_init(block_rate_hz, 30.0f, 0u);
 
@@ -42,6 +50,33 @@ void setup() {
 
 void loop() {
     audio_tick();
+    
+    // Handle octave control buttons with debouncing
+    uint32_t now = millis();
+    const uint32_t debounce_ms = 200;
+    
+    if (digitalRead(PIN_OCTAVE_UP) == LOW && (now - g_octave_up_last_press) > debounce_ms) {
+        int current_octave = ae_get_octave_shift();
+        ae_set_octave_shift(current_octave + 1);
+        g_octave_up_last_press = now;
+        Serial.print(F("Octave up: "));
+        Serial.println(ae_get_octave_shift());
+    }
+    
+    if (digitalRead(PIN_OCTAVE_DOWN) == LOW && (now - g_octave_down_last_press) > debounce_ms) {
+        int current_octave = ae_get_octave_shift();
+        ae_set_octave_shift(current_octave - 1);
+        g_octave_down_last_press = now;
+        Serial.print(F("Octave down: "));
+        Serial.println(ae_get_octave_shift());
+    }
+    
+    static uint32_t last_switch = 0;
+    // Rotate chord every 3 seconds for demo
+    if (now - last_switch > 3000) {
+        ae_next_glyph();
+        last_switch = now;
+    }
 }
 
 void setup1() {
@@ -89,13 +124,12 @@ void loop1() {
     display.drawLine(0, 18, DISPLAY_WIDTH, 18, SSD1306_WHITE);
 
     display.setCursor(0, 22);
-    display.println("ADC Values:");
-    for (int i = 0; i < NUM_ADC_INPUTS; ++i) {
-        display.setCursor(0, 34 + (i * 8));
-        display.printf("Ch%d: %4d", i, adc_results_buf[i]);
-    }
-
-    display.setCursor(0, 58);
-    display.println("Noise: ON");
+    display.println("Current Chord:");
+    display.setCursor(0, 34);
+    display.println(ae_current_glyph_name());
+    
+    display.setCursor(0, 46);
+    display.print("Octave: ");
+    display.println(ae_get_octave_shift());
     display.display();
 }

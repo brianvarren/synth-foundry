@@ -49,6 +49,10 @@
 #define PIN_BUTTON_SELECT    8     // Select/Enter button
 #define PIN_BUTTON_BACK      9     // Back/Escape button
 
+// ── Octave Control Configuration ────────────────────────────────────────────────
+#define PIN_OCTAVE_UP        2     // Octave up button (GP2)
+#define PIN_OCTAVE_DOWN      3     // Octave down button (GP3)
+
 
 // ── System Configuration ───────────────────────────────────────────────────────
 #define CORE_AUDIO           0     // Core 0: Audio processing

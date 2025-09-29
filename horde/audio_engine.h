@@ -77,3 +77,23 @@ void ae_set_noise_filter(float cutoff_hz, float feedback);
  * @brief Clear the resonant filter state to avoid parameter change transients
  */
 void ae_reset_noise_filter();
+
+/**
+ * @brief Advance to the next glyph in the playlist and refresh filter params
+ */
+void ae_next_glyph();
+
+/**
+ * @brief Get name/label of the current glyph/chord for UI display
+ */
+const char* ae_current_glyph_name();
+
+/**
+ * @brief Get current octave shift (-2 to +2)
+ */
+int ae_get_octave_shift();
+
+/**
+ * @brief Set octave shift (-2 to +2)
+ */
+void ae_set_octave_shift(int octaves);
