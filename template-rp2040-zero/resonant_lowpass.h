@@ -38,6 +38,7 @@ void resonant_lowpass_init(ResonantLowpass2P* filter);
 void resonant_lowpass_reset(ResonantLowpass2P* filter);
 void resonant_lowpass_set_cutoff(ResonantLowpass2P* filter, float cutoff_hz, float sample_rate_hz);
 void resonant_lowpass_set_feedback(ResonantLowpass2P* filter, float feedback);
+void resonant_lowpass_set_feedback_q15(ResonantLowpass2P* filter, int16_t feedback_q15);
 
 /**
  * @brief Process one Q1.15 sample through the resonant low-pass filter
@@ -85,4 +86,3 @@ static inline int16_t resonant_lowpass_process(ResonantLowpass2P* filter, int16_
     if (out < -32768) out = -32768;
     return (int16_t)out;
 }
-

@@ -30,14 +30,15 @@
 #include <Arduino.h>
 #include "audio_engine.h"
 #include "DACless.h"
+#include "ADCless.h"
 #include "adc_filter.h"
 #include "fixed_point_utils.h"
-#include "resonant_lowpass.h"
+#include "resonant_bandpass.h"
 
 // ── Audio Engine State ──────────────────────────────────────────────────────
 static uint32_t g_noise_state = 12345;  // PRNG state for noise generation
-static ResonantLowpass2P g_noise_filter;
-static float g_noise_filter_cutoff_hz = 440.0f;
+static ResonantBandpass2P g_noise_filter;
+static float g_noise_filter_cutoff_hz = 50.0f;
 static float g_noise_filter_feedback = 0.98f;
 static bool g_noise_filter_inited = false;
 static bool g_noise_filter_params_dirty = true;
@@ -62,23 +63,24 @@ static inline int16_t generate_noise_sample() {
 
 static void ae_update_noise_filter() {
     if (!g_noise_filter_inited) {
-        resonant_lowpass_init(&g_noise_filter);
+        resonant_bandpass_init(&g_noise_filter);
         g_noise_filter_inited = true;
         g_noise_filter_params_dirty = true;
     }
 
     if (g_noise_filter_params_dirty) {
-        resonant_lowpass_set_cutoff(&g_noise_filter, g_noise_filter_cutoff_hz, audio_rate);
-        resonant_lowpass_set_feedback(&g_noise_filter, g_noise_filter_feedback);
+        resonant_bandpass_set_cutoff(&g_noise_filter, g_noise_filter_cutoff_hz, audio_rate);
+        resonant_bandpass_set_feedback(&g_noise_filter, g_noise_filter_feedback);
         g_noise_filter_params_dirty = false;
     }
 }
 
 void audio_tick(void) {
+
     // Process audio when either channel is ready to prevent buffer underruns
     // This fixes the pop issue caused by waiting for both channels simultaneously
     if (callback_flag_L > 0) {
-        //adc_filter_update_from_dma();
+        adc_filter_update_from_dma();
         ae_render_block();
         callback_flag_L = 0;
     }
@@ -102,13 +104,13 @@ void ae_set_noise_filter(float cutoff_hz, float feedback) {
 
 void ae_reset_noise_filter() {
     if (!g_noise_filter_inited) {
-        resonant_lowpass_init(&g_noise_filter);
+        resonant_bandpass_init(&g_noise_filter);
         g_noise_filter_inited = true;
         g_noise_filter_params_dirty = true;
         return;
     }
 
-    resonant_lowpass_reset(&g_noise_filter);
+    resonant_bandpass_reset(&g_noise_filter);
 }
 
 /**
@@ -133,16 +135,17 @@ void ae_render_block() {
     const int32_t kFeedbackMaxQ15 = 32700; // keep headroom to prevent runaway
     uint16_t feedback_adc = adc_filter_get(0);
     int32_t feedback_q15 = ((int32_t)feedback_adc * kFeedbackMaxQ15 + 2047) / 4095;
-    resonant_lowpass_set_feedback_q15(&g_noise_filter, (int16_t)feedback_q15);
+    resonant_bandpass_set_feedback_q15(&g_noise_filter, (int16_t)feedback_q15);
+    g_noise_filter_feedback = (float)feedback_q15 / 32767.0f;
 
     // Generate audio samples for the current buffer
     for (int i = 0; i < AUDIO_BLOCK_SIZE; i++) {
         // Generate white noise sample in Q1.15 format
         int16_t audio_sample = generate_noise_sample();
 
-        // Shape noise into a resonant tone
-        audio_sample = resonant_lowpass_process(&g_noise_filter, audio_sample);
-        
+        // Shape noise into a resonant tone (cascade stages)
+        audio_sample = resonant_bandpass_process(&g_noise_filter, audio_sample);
+
         // Convert Q1.15 audio sample to 12-bit PWM duty cycle
         target[i] = q15_to_pwm(audio_sample);
     }

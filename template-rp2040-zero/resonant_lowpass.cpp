@@ -72,3 +72,19 @@ void resonant_lowpass_set_feedback(ResonantLowpass2P* filter, float feedback) {
     filter->feedback_q15 = float_to_q15(feedback);
 }
 
+void resonant_lowpass_set_feedback_q15(ResonantLowpass2P* filter, int16_t feedback_q15) {
+    if (!filter) {
+        return;
+    }
+
+    // Clamp to a safe range below self-oscillation runaway
+    const int16_t kMax = 32752; // ≈ 0.9995 in Q1.15 without invoking floats
+    if (feedback_q15 < 0) {
+        feedback_q15 = 0;
+    }
+    if (feedback_q15 > kMax) {
+        feedback_q15 = kMax;
+    }
+
+    filter->feedback_q15 = feedback_q15;
+}
